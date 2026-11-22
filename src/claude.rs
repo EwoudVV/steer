@@ -40,6 +40,12 @@ pub fn parse_session(path: &Path, mut t3: Option<&mut crate::t3::Db>) -> Option<
     let mut cwd = None;
     let mut custom_title = None;
     let mut ai_title = None;
+    let mut session = None;
+    // T3 only started marking its lines "t3-code" in November 2026, so one marked line
+    // makes the whole session T3's. Until the end, turns that came in through the SDK
+    // are kept aside as (index in events, time, fingerprint).
+    let mut ran_by_t3 = false;
+    let mut sdk_turns = Vec::new();
 
     for line in reader.lines() {
         let Ok(line) = line else { continue };
@@ -64,15 +70,46 @@ pub fn parse_session(path: &Path, mut t3: Option<&mut crate::t3::Db>) -> Option<
         if cwd.is_none() {
             cwd = str_field(&v, "cwd");
         }
+        if session.is_none() {
+            session = str_field(&v, "sessionId");
+        }
+        ran_by_t3 |= from_t3(&v);
         let event = if ty == "assistant" {
             assistant_event(&v, t)
         } else {
             user_event(&v, t).or_else(|| typed_in_t3(&v, t, t3.as_deref_mut()))
         };
         if let Some(mut e) = event {
+            if ty == "user" && !from_t3(&v) && sent_by_sdk(&v) {
+                if let Some((_, text, _)) = prompt_line(&v) {
+                    sdk_turns.push((events.len(), t, prompt_key(&text)));
+                }
+            }
             e.id = v.get("uuid").and_then(Value::as_str).map(hash_id);
             events.push(e);
         }
+    }
+
+    // In a session T3 ran (a line says so, or T3's database knows the session), the
+    // unmarked SDK turns only count if T3's database says the person wrote them.
+    let session = session.as_deref();
+    let known = |db: &mut crate::t3::Db| session.is_some_and(|s| db.knows(s));
+    if !sdk_turns.is_empty() && (ran_by_t3 || t3.as_deref_mut().is_some_and(known)) {
+        let mut unverified = std::collections::HashSet::new();
+        for (i, t, key) in &sdk_turns {
+            let typed = match (t3.as_deref_mut(), session) {
+                (Some(db), Some(s)) => db.typed(s, None, *t, key) == Some(true),
+                _ => false,
+            };
+            if !typed {
+                unverified.insert(*i);
+            }
+        }
+        let mut i = 0;
+        events.retain(|_| {
+            i += 1;
+            !unverified.contains(&(i - 1))
+        });
     }
 
     if events.is_empty() {
@@ -349,18 +386,31 @@ mod tests {
         fake(
             &db,
             &[("th1", "s1")],
-            &[("m1", "th1", at(-1), by("user", "web", "add a pause menu")), ("m2", "th1", at(19), by("agent", "mcp", "review the pause menu"))],
+            &[
+                ("m0", "th1", at(-101), by("user", "web", "start the router dashboard")),
+                ("m1", "th1", at(-1), by("user", "web", "add a pause menu")),
+                ("m2", "th1", at(19), by("agent", "mcp", "review the pause menu")),
+            ],
         );
+        // Before November 2026 T3's lines weren't marked "t3-code" yet.
+        let mut older = t3_line(-100, "start the router dashboard");
+        older["entrypoint"] = "sdk-ts".into();
         let log = tmp.join("s1.jsonl");
-        let lines = [t3_line(0, "add a pause menu"), t3_line(20, "review the pause menu")];
+        let lines = [older.clone(), t3_line(0, "add a pause menu"), t3_line(20, "review the pause menu")];
         fs::write(&log, lines.iter().map(|l| format!("{l}\n")).collect::<String>()).unwrap();
+        // Another app on the Agent SDK, which T3 doesn't know.
+        let other = tmp.join("s7.jsonl");
+        older["sessionId"] = "s7".into();
+        fs::write(&other, format!("{older}\n")).unwrap();
 
-        let prompts = |t3: Option<&mut crate::t3::Db>| {
-            parse_session(&log, t3).map_or(0, |s| s.events.iter().filter(|e| matches!(e.kind, EventKind::Prompt(_))).count())
+        let prompts = |log: &Path, t3: Option<&mut crate::t3::Db>| {
+            parse_session(log, t3).map_or(0, |s| s.events.iter().filter(|e| matches!(e.kind, EventKind::Prompt(_))).count())
         };
-        assert_eq!(prompts(None), 0);
+        assert_eq!(prompts(log.as_path(), None), 0);
+        assert_eq!(prompts(other.as_path(), None), 1);
         let mut t3 = crate::t3::Db::open(&db).unwrap();
-        assert_eq!(prompts(Some(&mut t3)), 1, "only the one the person typed");
+        assert_eq!(prompts(log.as_path(), Some(&mut t3)), 2, "only the ones the person typed");
+        assert_eq!(prompts(other.as_path(), Some(&mut t3)), 1);
         drop(t3);
         let _ = fs::remove_dir_all(&tmp);
     }

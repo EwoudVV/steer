@@ -104,6 +104,11 @@ impl Db {
         self.threads.as_ref()?.get(session).cloned()
     }
 
+    /// Whether T3 started this Claude Code or Codex session (and still knows it).
+    pub(crate) fn knows(&mut self, session: &str) -> bool {
+        self.thread_of(session).is_some()
+    }
+
     /// Whether the person wrote the prompt T3 sent to `session` at `t`, found by its
     /// fingerprint (`claude::prompt_key`). `thread` is the thread the hook was told, if
     /// any. None when T3's database can't say: the session isn't one T3 started (a

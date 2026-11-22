@@ -241,13 +241,17 @@ assert.deepEqual(checks(reportOf([session("normal", honest())])), []);
 // the person typing in T3 or in any other app on the Agent SDK. Only T3's database can
 // tell them apart, so from the log alone T3's "sdk" turns don't count.
 {
-  const reader = new SessionReader("p/t3.jsonl");
   const line = (uuid, extra) =>
     JSON.stringify({ type: "user", uuid, timestamp: "2026-11-22T20:00:00.000Z", promptSource: "sdk", turnOrigin: "sdk", message: { role: "user", content: "add a pause menu to main.rs" }, ...extra });
-  reader.line(line("a", { entrypoint: "t3-code" }));
-  reader.line(line("b", { entrypoint: "sdk-ts" }));
-  const prompts = reader.finish().events.filter((e) => e.kind === "prompt");
-  assert.deepEqual(prompts.map((e) => e.id), ["b"], "only the prompt from the other sdk app counts");
+  const prompts = (...entrypoints) => {
+    const reader = new SessionReader("p/t3.jsonl");
+    entrypoints.forEach((entrypoint, i) => reader.line(line(`p${i}`, { entrypoint })));
+    return (reader.finish()?.events ?? []).filter((e) => e.kind === "prompt").length;
+  };
+  assert.equal(prompts("sdk-ts", "sdk-ts"), 2, "other apps on the sdk count like before");
+  assert.equal(prompts("t3-code"), 0);
+  // Before November 2026 T3's lines said "sdk-ts". One "t3-code" line makes it T3's.
+  assert.equal(prompts("sdk-ts", "t3-code"), 0);
 }
 
 console.log("counting tests passed");

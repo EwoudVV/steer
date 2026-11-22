@@ -128,6 +128,10 @@ export class SessionReader {
     this.cwd = null;
     this.customTitle = null;
     this.aiTitle = null;
+    // T3 only started marking its lines "t3-code" in November 2026, so one marked line
+    // makes the whole session T3's (see finish).
+    this.t3 = false;
+    this.sdk = [];
   }
 
   line(s) {
@@ -147,14 +151,21 @@ export class SessionReader {
     const t = typeof v.timestamp === "string" ? Date.parse(v.timestamp) : NaN;
     if (Number.isNaN(t)) return;
     if (this.cwd === null) this.cwd = str(v.cwd);
+    if (v.entrypoint === "t3-code") this.t3 = true;
     const e = ty === "assistant" ? assistantEvent(v, t) : userEvent(v, t);
     if (e) {
       e.id = str(v.uuid);
+      if (ty === "user" && sentBySdk(v)) this.sdk.push(this.events.length);
       this.events.push(e);
     }
   }
 
   finish() {
+    // In a session T3 ran, unmarked SDK turns don't count either (see userEvent).
+    if (this.t3 && this.sdk.length > 0) {
+      const unverified = new Set(this.sdk);
+      this.events = this.events.filter((_, i) => !unverified.has(i));
+    }
     if (this.events.length === 0) return null;
     this.events.sort((a, b) => a.t - b.t);
     return { path: this.path, cwd: this.cwd, title: this.customTitle ?? this.aiTitle, events: this.events };
@@ -168,6 +179,12 @@ function assistantEvent(v, t) {
     ? content.filter((b) => b?.type === "tool_use" && typeof b.name === "string").map((b) => b.name)
     : [];
   return { t, kind: "agent", tools };
+}
+
+/** Whether a turn came in through the Claude Agent SDK. */
+function sentBySdk(v) {
+  const originKind = v.origin && typeof v.origin === "object" ? v.origin.kind : undefined;
+  return [originKind, v.turnOrigin, v.promptSource].includes("sdk");
 }
 
 function userEvent(v, t) {
@@ -190,7 +207,7 @@ function userEvent(v, t) {
   // T3 Code sends what agents write to each other through the SDK too, and only its own
   // database can tell that apart from what the person typed. The browser can't read it
   // (steer report does), so T3's "sdk" turns don't count here.
-  if (v.entrypoint === "t3-code" && [originKind, v.turnOrigin, v.promptSource].includes("sdk")) return null;
+  if (v.entrypoint === "t3-code" && sentBySdk(v)) return null;
 
   const [raw, images] = extractText(content);
   const text = stripTag(raw, "system-reminder").trim();

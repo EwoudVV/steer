@@ -182,11 +182,15 @@ function userEvent(v, t) {
   }
 
   const originKind = v.origin && typeof v.origin === "object" ? v.origin.kind : undefined;
-  // "sdk" is a person typing in an app built on the Claude Agent SDK, like T3 Code.
+  // "sdk" is a person typing in an app built on the Claude Agent SDK, except in T3 Code.
   const fromPerson = (s) => s === "human" || s === "sdk";
   if (typeof originKind === "string" && !fromPerson(originKind)) return null;
   if (typeof v.turnOrigin === "string" && !fromPerson(v.turnOrigin)) return null;
   if (v.promptSource === "system") return null;
+  // T3 Code sends what agents write to each other through the SDK too, and only its own
+  // database can tell that apart from what the person typed. The browser can't read it
+  // (steer report does), so T3's "sdk" turns don't count here.
+  if (v.entrypoint === "t3-code" && [originKind, v.turnOrigin, v.promptSource].includes("sdk")) return null;
 
   const [raw, images] = extractText(content);
   const text = stripTag(raw, "system-reminder").trim();

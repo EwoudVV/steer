@@ -5,7 +5,7 @@ use crate::live::{event, home, project_name, prompt_event, tool_event};
 use crate::prompt::PromptInfo;
 use crate::tail;
 use chrono::{DateTime, Utc};
-use serde_json::{Map, Value};
+use serde_json::{json, Map, Value};
 use std::fs::File;
 use std::io::{BufRead, BufReader, Read};
 use std::path::{Path, PathBuf};
@@ -64,7 +64,14 @@ pub fn parse(v: &Value, session: &str, project: &str, line_offset: u64) -> Optio
     match v.get("type")?.as_str()? {
         "response_item" if kind == "message" && p.get("role").and_then(Value::as_str) == Some("user") => {
             let (text, images) = human_input(p)?;
-            Some(prompt_event(id, session, project, VIA, t, &PromptInfo::analyze(text.trim(), images)))
+            let mut e = prompt_event(id, session, project, VIA, t, &PromptInfo::analyze(text.trim(), images));
+            // T3 Code runs Codex too, and marks everything it sends as typed by the
+            // person, even what its agents wrote. If T3 is on this computer, the flush
+            // asks its database who wrote this one (see t3.rs).
+            if let Some(db) = crate::t3::db_path() {
+                e["check"] = json!({ "key": crate::claude::prompt_key(&text), "t3": { "db": db.to_string_lossy().into_owned() } });
+            }
+            Some(e)
         }
         "response_item" if kind.ends_with("call") => {
             let name = p.get("name").and_then(Value::as_str).unwrap_or(kind);

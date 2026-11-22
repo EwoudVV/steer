@@ -32,7 +32,9 @@ pub fn find_session_files(root: &Path) -> Vec<PathBuf> {
     out
 }
 
-pub fn parse_session(path: &Path) -> Option<Session> {
+/// `t3` is T3 Code's database, if it's on this computer. Only it can say which of T3's
+/// prompts the person wrote (see `from_t3`).
+pub fn parse_session(path: &Path, mut t3: Option<&mut crate::t3::Db>) -> Option<Session> {
     let reader = BufReader::new(File::open(path).ok()?);
     let mut events = Vec::new();
     let mut cwd = None;
@@ -62,7 +64,11 @@ pub fn parse_session(path: &Path) -> Option<Session> {
         if cwd.is_none() {
             cwd = str_field(&v, "cwd");
         }
-        let event = if ty == "assistant" { assistant_event(&v, t) } else { user_event(&v, t) };
+        let event = if ty == "assistant" {
+            assistant_event(&v, t)
+        } else {
+            user_event(&v, t).or_else(|| typed_in_t3(&v, t, t3.as_deref_mut()))
+        };
         if let Some(mut e) = event {
             e.id = v.get("uuid").and_then(Value::as_str).map(hash_id);
             events.push(e);
@@ -95,6 +101,37 @@ fn assistant_event(v: &Value, t: DateTime<Utc>) -> Option<Event> {
 }
 
 fn user_event(v: &Value, t: DateTime<Utc>) -> Option<Event> {
+    user_event_as(v, t, !from_t3(v))
+}
+
+/// Whether a line is from a Claude Code that T3 Code runs. T3 sends what agents write to
+/// each other (tasks one agent hands another, messages between threads, scheduled tasks)
+/// through the Agent SDK too, so in this log they look just like what the person typed.
+/// Only T3's database can tell them apart (see t3.rs), so its "sdk" turns don't count
+/// from the log alone.
+pub(crate) fn from_t3(v: &Value) -> bool {
+    v.get("entrypoint").and_then(Value::as_str) == Some("t3-code")
+}
+
+/// Whether a turn came in through the Claude Agent SDK.
+pub(crate) fn sent_by_sdk(v: &Value) -> bool {
+    v.pointer("/origin/kind").and_then(Value::as_str) == Some("sdk")
+        || ["turnOrigin", "promptSource"].iter().any(|k| v.get(*k).and_then(Value::as_str) == Some("sdk"))
+}
+
+/// For the report: a T3 turn, if T3's database says the person wrote it.
+fn typed_in_t3(v: &Value, t: DateTime<Utc>, db: Option<&mut crate::t3::Db>) -> Option<Event> {
+    let db = db?;
+    if !from_t3(v) || !sent_by_sdk(v) {
+        return None;
+    }
+    let session = v.get("sessionId").and_then(Value::as_str)?;
+    let (_, text, _) = prompt_line(v)?;
+    db.typed(session, None, t, &prompt_key(&text))?.then(|| user_event_as(v, t, true)).flatten()
+}
+
+/// `sdk_typed`: whether a turn that came in through the Agent SDK is the person typing.
+fn user_event_as(v: &Value, t: DateTime<Utc>, sdk_typed: bool) -> Option<Event> {
     // Entries the harness injects rather than the human typing them.
     if ["isMeta", "isCompactSummary", "isVisibleInTranscriptOnly", "isVirtual"]
         .iter()
@@ -119,7 +156,8 @@ fn user_event(v: &Value, t: DateTime<Utc>) -> Option<Event> {
 
     // Newer logs mark who started a turn. Anything not from the human is skipped
     // (background task notices, messages from other agents, synthetic turns). "sdk" is
-    // a person typing in an app built on the Claude Agent SDK, like T3 Code.
+    // a person typing in an app built on the Claude Agent SDK, except in T3 Code (see
+    // `from_t3`).
     let from_person = |s: &str| s == "human" || s == "sdk";
     if let Some(kind) = v.pointer("/origin/kind").and_then(Value::as_str) {
         if !from_person(kind) {
@@ -132,6 +170,9 @@ fn user_event(v: &Value, t: DateTime<Utc>) -> Option<Event> {
         }
     }
     if v.get("promptSource").and_then(Value::as_str) == Some("system") {
+        return None;
+    }
+    if !sdk_typed && sent_by_sdk(v) {
         return None;
     }
 
@@ -279,11 +320,48 @@ mod tests {
 
     #[test]
     fn prompts_typed_in_sdk_apps_count() {
-        // T3 Code and other apps on the Claude Agent SDK mark turns as "sdk".
+        // Apps on the Claude Agent SDK mark turns as "sdk".
         assert!(prompt_line(&line("human")).unwrap().2);
         assert!(prompt_line(&line("sdk")).unwrap().2);
         for not_typed in ["task-notification", "task_notification", "peer", "coordinator", "scheduled", "host_synthetic"] {
             assert!(!prompt_line(&line(not_typed)).unwrap().2, "{not_typed} isn't a person typing");
         }
+    }
+
+    #[test]
+    fn t3_turns_count_only_when_t3_says_the_person_wrote_them() {
+        use crate::t3::tests::{at, by, fake};
+        let t3_line = |s: i64, text: &str| {
+            let mut v = line("sdk");
+            v["timestamp"] = at(s).to_rfc3339_opts(chrono::SecondsFormat::Millis, true).into();
+            v["entrypoint"] = "t3-code".into();
+            v["promptSource"] = "sdk".into();
+            v["sessionId"] = "s1".into();
+            v["message"]["content"] = text.into();
+            v
+        };
+        // From the log alone it can't be told who wrote these.
+        assert!(!prompt_line(&t3_line(0, "add a pause menu")).unwrap().2);
+
+        let tmp = std::env::temp_dir().join(format!("steer-t3-report-{}", crate::live::new_id()));
+        fs::create_dir_all(&tmp).unwrap();
+        let db = tmp.join("statev2.sqlite");
+        fake(
+            &db,
+            &[("th1", "s1")],
+            &[("m1", "th1", at(-1), by("user", "web", "add a pause menu")), ("m2", "th1", at(19), by("agent", "mcp", "review the pause menu"))],
+        );
+        let log = tmp.join("s1.jsonl");
+        let lines = [t3_line(0, "add a pause menu"), t3_line(20, "review the pause menu")];
+        fs::write(&log, lines.iter().map(|l| format!("{l}\n")).collect::<String>()).unwrap();
+
+        let prompts = |t3: Option<&mut crate::t3::Db>| {
+            parse_session(&log, t3).map_or(0, |s| s.events.iter().filter(|e| matches!(e.kind, EventKind::Prompt(_))).count())
+        };
+        assert_eq!(prompts(None), 0);
+        let mut t3 = crate::t3::Db::open(&db).unwrap();
+        assert_eq!(prompts(Some(&mut t3)), 1, "only the one the person typed");
+        drop(t3);
+        let _ = fs::remove_dir_all(&tmp);
     }
 }

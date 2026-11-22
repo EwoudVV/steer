@@ -176,6 +176,11 @@ fn record() -> Option<()> {
             if let Some(log) = v.get("transcript_path").and_then(Value::as_str) {
                 e["check"] = json!({ "log": log, "key": crate::claude::prompt_key(text) });
             }
+            // Prompts from T3 Code also get looked up in its database (see t3.rs).
+            if let Some(t3) = crate::t3::hook_check(&v) {
+                e["check"]["key"] = crate::claude::prompt_key(text).into();
+                e["check"]["t3"] = t3;
+            }
             e
         }
         "PostToolUse" => {
@@ -398,9 +403,12 @@ enum Verdict {
     Wait,
 }
 
-/// A prompt in Claude Code's log: when, the fingerprint of its text, and whether the
-/// person typed it.
-type LogPrompt = (DateTime<Utc>, String, bool);
+/// A prompt in Claude Code's log: when, the fingerprint of its text, whether the person
+/// typed it, and whether it came in through the Agent SDK.
+type LogPrompt = (DateTime<Utc>, String, bool, bool);
+
+/// T3 Code's databases, each opened once per flush.
+type T3Dbs = HashMap<String, Option<crate::t3::Db>>;
 
 /// The Claude Code hook can't tell who sent a prompt, but Claude Code's log for the
 /// session says it: the person, a background task notice, another agent, a schedule. So
@@ -408,29 +416,63 @@ type LogPrompt = (DateTime<Utc>, String, bool);
 /// looked up there a few seconds later. Typed ones get sent, the rest are dropped. One
 /// that never shows up within a minute is sent anyway, so a change in the log format
 /// can't lose real prompts.
-fn verdict(e: &Value, now: DateTime<Utc>, logs: &mut HashMap<String, Vec<LogPrompt>>) -> Verdict {
+///
+/// T3 Code sends its agents' messages through the Agent SDK too, the same way as what
+/// the person types, so for its prompts the log can't say. Those carry `check.t3`, and
+/// T3's own database decides (see t3.rs). Codex prompts have no log to look in, so for
+/// them only T3's database is asked.
+fn verdict(e: &Value, now: DateTime<Utc>, logs: &mut HashMap<String, Vec<LogPrompt>>, t3: &mut T3Dbs) -> Verdict {
     let Some(check) = e.get("check") else { return Verdict::Send };
-    let (Some(path), Some(key)) = (check["log"].as_str(), check["key"].as_str()) else { return Verdict::Send };
+    let Some(key) = check["key"].as_str() else { return Verdict::Send };
     let t = e["t"]
         .as_str()
         .and_then(|s| DateTime::parse_from_rfc3339(s).ok())
         .map_or(now, |d| d.with_timezone(&Utc));
+    let in_t3 = check["t3"].is_object();
+    if check["t3"]["agent"] == true {
+        return Verdict::Drop;
+    }
+    let Some(path) = check["log"].as_str() else {
+        return match t3_typed(e, t, key, t3) {
+            Some(false) => Verdict::Drop,
+            _ => Verdict::Send,
+        };
+    };
     let lines = logs.entry(path.to_owned()).or_insert_with(|| log_prompts(Path::new(path)));
     let near: Vec<&LogPrompt> =
-        lines.iter().filter(|(lt, _, _)| (-10..=60).contains(&(*lt - t).num_seconds())).collect();
-    if let Some((_, _, typed)) = near.iter().find(|(_, k, _)| k == key) {
+        lines.iter().filter(|(lt, _, _, _)| (-10..=60).contains(&(*lt - t).num_seconds())).collect();
+    if let Some((_, _, typed, sdk)) = near.iter().find(|(_, k, _, _)| k == key) {
+        if *sdk && in_t3 {
+            if let Some(typed) = t3_typed(e, t, key, t3) {
+                return if typed { Verdict::Send } else { Verdict::Drop };
+            }
+        }
         return if *typed { Verdict::Send } else { Verdict::Drop };
     }
     if (now - t).num_seconds() < 60 {
         return Verdict::Wait;
     }
+    if in_t3 {
+        if let Some(typed) = t3_typed(e, t, key, t3) {
+            return if typed { Verdict::Send } else { Verdict::Drop };
+        }
+    }
     // Never found its own line. If everything around it in the log was not typed, it
     // wasn't either.
-    if !near.is_empty() && near.iter().all(|(_, _, typed)| !typed) {
+    if !near.is_empty() && near.iter().all(|(_, _, typed, _)| !typed) {
         Verdict::Drop
     } else {
         Verdict::Send
     }
+}
+
+/// Asks T3 Code's database whether the person wrote a prompt. None if it can't say.
+fn t3_typed(e: &Value, t: DateTime<Utc>, key: &str, dbs: &mut T3Dbs) -> Option<bool> {
+    let check = &e["check"]["t3"];
+    let path = check["db"].as_str()?;
+    let session = e["session"].as_str()?;
+    let db = dbs.entry(path.to_owned()).or_insert_with(|| crate::t3::Db::open(Path::new(path))).as_mut()?;
+    db.typed(session, check["thread"].as_str(), t, key)
 }
 
 /// The prompts near the end of a Claude Code log: when, the fingerprint of the text, and
@@ -453,14 +495,17 @@ fn log_prompts(path: &Path) -> Vec<LogPrompt> {
     lines
         .filter(|l| l.contains("\"type\":\"user\""))
         .filter_map(|l| serde_json::from_str::<Value>(l).ok())
-        .filter_map(|v| crate::claude::prompt_line(&v))
-        .map(|(t, text, typed)| (t, crate::claude::prompt_key(&text), typed))
+        .filter_map(|v| {
+            let (t, text, typed) = crate::claude::prompt_line(&v)?;
+            Some((t, crate::claude::prompt_key(&text), typed, crate::claude::sent_by_sdk(&v)))
+        })
         .collect()
 }
 
 fn send_files(config: &Config, waiting: &mut Vec<Value>) -> Result<usize, String> {
     let mut sent = 0;
     let mut logs = HashMap::new();
+    let mut t3 = HashMap::new();
     loop {
         // Move the queue aside first, so hooks can keep adding to a fresh one meanwhile.
         let queue = dir().join("queue.jsonl");
@@ -487,10 +532,10 @@ fn send_files(config: &Config, waiting: &mut Vec<Value>) -> Result<usize, String
             let mut ready = Vec::new();
             let mut held = Vec::new();
             for mut e in events {
-                match verdict(&e, now, &mut logs) {
+                match verdict(&e, now, &mut logs, &mut t3) {
                     Verdict::Send => {
                         if let Some(o) = e.as_object_mut() {
-                            o.remove("check"); // the log's path never leaves this computer
+                            o.remove("check"); // the log's path and T3's thread never leave this computer
                         }
                         ready.push(e);
                     }
@@ -1150,18 +1195,77 @@ mod tests {
             e
         };
         let later = t0 + chrono::Duration::seconds(90);
-        let mut logs = HashMap::new();
+        let (mut logs, mut dbs) = (HashMap::new(), HashMap::new());
         let send = |v: Verdict| matches!(v, Verdict::Send);
         // The hook's text and the log's can differ in spacing.
-        assert!(send(verdict(&hooked("make the snake move faster", 0), later, &mut logs)));
-        assert!(matches!(verdict(&hooked("Another session says the build is done", 5), later, &mut logs), Verdict::Drop));
-        assert!(matches!(verdict(&hooked("Hourly check, look at the inbox", 10), later, &mut logs), Verdict::Drop));
+        assert!(send(verdict(&hooked("make the snake move faster", 0), later, &mut logs, &mut dbs)));
+        assert!(matches!(verdict(&hooked("Another session says the build is done", 5), later, &mut logs, &mut dbs), Verdict::Drop));
+        assert!(matches!(verdict(&hooked("Hourly check, look at the inbox", 10), later, &mut logs, &mut dbs), Verdict::Drop));
         // Not in the log yet: wait. Still not there after a minute: send it anyway.
         let mut fresh = HashMap::new();
-        assert!(matches!(verdict(&hooked("add a pause menu", 300), t0 + chrono::Duration::seconds(305), &mut fresh), Verdict::Wait));
-        assert!(send(verdict(&hooked("add a pause menu", 300), t0 + chrono::Duration::seconds(400), &mut fresh)));
+        assert!(matches!(verdict(&hooked("add a pause menu", 300), t0 + chrono::Duration::seconds(305), &mut fresh, &mut dbs), Verdict::Wait));
+        assert!(send(verdict(&hooked("add a pause menu", 300), t0 + chrono::Duration::seconds(400), &mut fresh, &mut dbs)));
         // No check at all (older client, or Cursor): sent like before.
-        assert!(send(verdict(&event(new_id(), "s1", "game", "claude-code", t0, "prompt"), later, &mut logs)));
+        assert!(send(verdict(&event(new_id(), "s1", "game", "claude-code", t0, "prompt"), later, &mut logs, &mut dbs)));
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn t3_prompts_are_checked_in_its_database() {
+        use crate::t3::tests::{at, by, fake};
+        let tmp = std::env::temp_dir().join(format!("steer-t3-log-{}", new_id()));
+        fs::create_dir_all(&tmp).unwrap();
+        let db = tmp.join("statev2.sqlite");
+        fake(
+            &db,
+            &[("th1", "s1")],
+            &[("m1", "th1", at(-1), by("user", "web", "add a pause menu")), ("m2", "th1", at(9), by("agent", "mcp", "The tests pass now, merge it"))],
+        );
+        // Every prompt T3 sends looks the same in Claude Code's log.
+        let stamp = |s: i64| at(s).to_rfc3339_opts(SecondsFormat::Millis, true);
+        let sdk = |s: i64, text: &str| {
+            json!({ "type": "user", "timestamp": stamp(s), "entrypoint": "t3-code", "promptSource": "sdk", "turnOrigin": "sdk", "message": { "role": "user", "content": text } })
+        };
+        let notice = json!({ "type": "user", "timestamp": stamp(20), "entrypoint": "t3-code", "origin": { "kind": "task-notification" }, "turnOrigin": "task_notification", "message": { "role": "user", "content": "Background command finished" } });
+        let log = tmp.join("session.jsonl");
+        let lines = [sdk(0, "add a pause menu"), sdk(10, "The tests pass now, merge it"), notice];
+        fs::write(&log, lines.iter().map(|l| format!("{l}\n")).collect::<String>()).unwrap();
+
+        let in_t3 = json!({ "db": db.to_string_lossy(), "thread": "th1", "agent": false });
+        let hooked = |session: &str, text: &str, s: i64, t3: &Value| {
+            let mut e = event(new_id(), session, "game", "claude-code", at(s), "prompt");
+            e["check"] = json!({ "log": log.to_string_lossy(), "key": crate::claude::prompt_key(text), "t3": t3 });
+            e
+        };
+        let later = at(90);
+        let (mut logs, mut dbs) = (HashMap::new(), HashMap::new());
+        let mut verdict_of = |e: Value| verdict(&e, later, &mut logs, &mut dbs);
+        assert!(matches!(verdict_of(hooked("s1", "add a pause menu", 0, &in_t3)), Verdict::Send));
+        assert!(matches!(verdict_of(hooked("s1", "The tests pass now, merge it", 10, &in_t3)), Verdict::Drop));
+        // What the log says isn't from T3 at all still doesn't count.
+        assert!(matches!(verdict_of(hooked("s1", "Background command finished", 20, &in_t3)), Verdict::Drop));
+        // A Claude Code an agent started inside the thread has T3's environment, but T3
+        // doesn't know its session, and from the log alone T3's prompts don't count.
+        assert!(matches!(verdict_of(hooked("s2", "add a pause menu", 0, &in_t3)), Verdict::Drop));
+        // A subagent's prompt.
+        let mut agent = in_t3.clone();
+        agent["agent"] = true.into();
+        assert!(matches!(verdict_of(hooked("s1", "add a pause menu", 0, &agent)), Verdict::Drop));
+        // T3's database can't be read: the log alone decides.
+        let gone = json!({ "db": tmp.join("gone.sqlite").to_string_lossy(), "thread": "th1", "agent": false });
+        assert!(matches!(verdict_of(hooked("s1", "add a pause menu", 0, &gone)), Verdict::Drop));
+
+        // Codex prompts have no Claude Code log. One from a session T3 doesn't know is sent
+        // like before.
+        let codex = |session: &str, text: &str, s: i64| {
+            let mut e = event(new_id(), session, "game", "codex", at(s), "prompt");
+            e["check"] = json!({ "key": crate::claude::prompt_key(text), "t3": { "db": db.to_string_lossy() } });
+            e
+        };
+        assert!(matches!(verdict_of(codex("s1", "add a pause menu", 0)), Verdict::Send));
+        assert!(matches!(verdict_of(codex("s1", "The tests pass now, merge it", 10)), Verdict::Drop));
+        assert!(matches!(verdict_of(codex("not-t3", "add a pause menu", 0)), Verdict::Send));
+        drop(dbs);
         let _ = fs::remove_dir_all(&tmp);
     }
 

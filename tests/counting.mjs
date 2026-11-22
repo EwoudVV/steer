@@ -4,7 +4,7 @@
 //   node tests/counting.mjs
 
 import assert from "node:assert/strict";
-import { analyzePrompt, applyCaps, buildReport, checks, gapCredit, projectHuman, projectOverlap, rulesFrom } from "../web/steer.js";
+import { SessionReader, analyzePrompt, applyCaps, buildReport, checks, gapCredit, projectHuman, projectOverlap, rulesFrom } from "../web/steer.js";
 
 const T0 = Date.UTC(2026, 10, 20, 15, 0, 0);
 const sec = (s) => T0 + s * 1000;
@@ -234,6 +234,20 @@ assert.deepEqual(checks(reportOf([session("normal", honest())])), []);
   const nightNotes = checks(night).flatMap((d) => d.notes).join(" | ");
   assert.match(nightNotes, /counted in 24 hours/);
   assert.doesNotMatch(nightNotes, /counted in one day/, "each day alone is under 12h");
+}
+
+// 14. Agents in T3 Code that prompt each other (a task one hands another, a message to
+// another thread, a scheduled task) show up in Claude Code's log as "sdk", the same as
+// the person typing in T3 or in any other app on the Agent SDK. Only T3's database can
+// tell them apart, so from the log alone T3's "sdk" turns don't count.
+{
+  const reader = new SessionReader("p/t3.jsonl");
+  const line = (uuid, extra) =>
+    JSON.stringify({ type: "user", uuid, timestamp: "2026-11-22T20:00:00.000Z", promptSource: "sdk", turnOrigin: "sdk", message: { role: "user", content: "add a pause menu to main.rs" }, ...extra });
+  reader.line(line("a", { entrypoint: "t3-code" }));
+  reader.line(line("b", { entrypoint: "sdk-ts" }));
+  const prompts = reader.finish().events.filter((e) => e.kind === "prompt");
+  assert.deepEqual(prompts.map((e) => e.id), ["b"], "only the prompt from the other sdk app counts");
 }
 
 console.log("counting tests passed");

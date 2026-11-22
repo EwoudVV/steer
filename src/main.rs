@@ -12,6 +12,7 @@ mod model;
 mod opencode;
 mod prompt;
 mod report;
+mod t3;
 mod tail;
 mod watch;
 
@@ -142,10 +143,12 @@ fn report(argv: &[String]) {
     let mut commit_cache: BTreeMap<PathBuf, Vec<DateTime<Utc>>> = BTreeMap::new();
     let mut by_name: BTreeMap<String, report::Project> = BTreeMap::new();
 
+    // Only T3 Code's database can say which of its prompts the person wrote (see t3.rs).
+    let mut t3_db = t3::db_path().and_then(|p| t3::Db::open(&p));
     // Resumed or forked sessions copy old entries into a new file. Go through sessions
     // oldest first and keep each entry only the first time it shows up, so the same
     // time isn't counted twice.
-    let mut sessions: Vec<model::Session> = files.iter().filter_map(|f| claude::parse_session(f)).collect();
+    let mut sessions: Vec<model::Session> = files.iter().filter_map(|f| claude::parse_session(f, t3_db.as_mut())).collect();
     sessions.sort_by_key(|s| s.events.first().map(|e| e.t));
     let mut seen = std::collections::HashSet::new();
 

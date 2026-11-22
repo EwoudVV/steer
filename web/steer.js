@@ -119,6 +119,8 @@ const SKIP = [
 // Lines that can't be a user, assistant or title entry get skipped without parsing.
 // Claude Code writes compact JSON, so the type always looks like "type":"user".
 const WANTED = ['"type":"user"', '"type":"assistant"', '"type":"custom-title"', '"type":"ai-title"'];
+// Every agent T3 Code runs gets T3's own tools, and the log lists them.
+const T3_TOOLS = '"mcp__t3-code__';
 
 /** Feed one session file line by line, then call finish(). */
 export class SessionReader {
@@ -129,12 +131,13 @@ export class SessionReader {
     this.customTitle = null;
     this.aiTitle = null;
     // T3 only started marking its lines "t3-code" in November 2026, so one marked line
-    // makes the whole session T3's (see finish).
+    // makes the whole session T3's, and so do T3's own tools (see finish).
     this.t3 = false;
     this.sdk = [];
   }
 
   line(s) {
+    if (s && s.includes(T3_TOOLS) && (s.includes('"type":"attachment"') || s.includes('"type":"assistant"'))) this.t3 = true;
     if (!s || !WANTED.some((w) => s.includes(w))) return;
     let v;
     try {

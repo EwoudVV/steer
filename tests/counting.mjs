@@ -250,8 +250,13 @@ assert.deepEqual(checks(reportOf([session("normal", honest())])), []);
   };
   assert.equal(prompts("sdk-ts", "sdk-ts"), 2, "other apps on the sdk count like before");
   assert.equal(prompts("t3-code"), 0);
-  // Before November 2026 T3's lines said "sdk-ts". One "t3-code" line makes it T3's.
+  // Before November 2026 T3's lines said "sdk-ts". One "t3-code" line makes it T3's,
+  // and so does T3's own tools showing up in the log.
   assert.equal(prompts("sdk-ts", "t3-code"), 0);
+  const tools = new SessionReader("p/old-t3.jsonl");
+  tools.line(line("q0", { entrypoint: "sdk-ts" }));
+  tools.line(JSON.stringify({ type: "attachment", attachment: { type: "deferred_tools_delta", addedNames: ["Read", "mcp__t3-code__delegate_task"] } }));
+  assert.equal(tools.finish(), null);
 }
 
 console.log("counting tests passed");

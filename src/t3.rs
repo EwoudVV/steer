@@ -13,7 +13,7 @@
 
 use crate::live::home;
 use chrono::{DateTime, SecondsFormat, Utc};
-use rusqlite::{Connection, OpenFlags};
+use rusqlite::{Connection, OpenFlags, OptionalExtension};
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -26,9 +26,10 @@ const RECENT: i64 = 20;
 /// is the thread's newest message, if that one is at most this old (seconds).
 const NEWEST_WITHIN: i64 = 15 * 60;
 
-const THREADS: &str = "select thread_id, json_extract(payload_json, '$.nativeThreadRef.nativeId')
-    from orchestration_v2_projection_provider_threads
-    where thread_id is not null and json_extract(payload_json, '$.nativeThreadRef.nativeId') is not null";
+/// Nothing indexes the session id, but the table is small (a row per thread T3 runs an
+/// agent in), so going through it is quick.
+const THREAD: &str = "select thread_id from orchestration_v2_projection_provider_threads
+    where json_extract(payload_json, '$.nativeThreadRef.nativeId') = ?1 and thread_id is not null limit 1";
 /// Uses T3's index on (thread_id, created_at), so it never reads the whole table.
 const MESSAGES: &str = "select message_id, created_at, payload_json from orchestration_v2_projection_messages
     where thread_id = ?1 and role = 'user' and created_at <= ?2 order by created_at desc limit ?3";
@@ -60,7 +61,7 @@ pub(crate) fn hook_check(input: &Value) -> Option<Value> {
 pub(crate) fn check() -> Option<(PathBuf, Result<(), String>)> {
     let path = db_path()?;
     let readable = Db::open(&path).ok_or_else(|| "it doesn't open".to_string()).and_then(|db| {
-        for sql in [THREADS, MESSAGES] {
+        for sql in [THREAD, MESSAGES] {
             db.conn.prepare(sql).map_err(|e| e.to_string())?;
         }
         Ok(())
@@ -68,11 +69,22 @@ pub(crate) fn check() -> Option<(PathBuf, Result<(), String>)> {
     Some((path, readable))
 }
 
+/// What T3's database says about a prompt.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) enum Says {
+    /// The person wrote it (true), or an agent did (false).
+    Typed(bool),
+    /// T3 didn't start this session, or it belongs to another thread.
+    NotT3s,
+    /// The database couldn't be read just now.
+    Unreadable,
+}
+
 /// T3's database, opened read-only for one flush or one report.
 pub(crate) struct Db {
     conn: Connection,
-    /// Claude Code and Codex session ids, to the T3 thread each one belongs to.
-    threads: Option<HashMap<String, String>>,
+    /// Sessions already looked up, and the T3 thread each one belongs to.
+    threads: HashMap<String, String>,
 }
 
 struct Message {
@@ -85,56 +97,61 @@ impl Db {
     pub(crate) fn open(path: &Path) -> Option<Db> {
         let conn = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX).ok()?;
         let _ = conn.busy_timeout(Duration::from_millis(500));
-        Some(Db { conn, threads: None })
+        Some(Db { conn, threads: HashMap::new() })
     }
 
-    /// The T3 thread a Claude Code or Codex session belongs to, if T3 started it.
-    fn thread_of(&mut self, session: &str) -> Option<String> {
-        if self.threads.is_none() {
-            let mut map = HashMap::new();
-            if let Ok(mut stmt) = self.conn.prepare(THREADS) {
-                if let Ok(rows) = stmt.query_map(rusqlite::params![], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))) {
-                    for (thread, session) in rows.flatten() {
-                        map.insert(session, thread);
-                    }
-                }
-            }
-            self.threads = Some(map);
+    /// The T3 thread a Claude Code or Codex session belongs to, if T3 started it. Only
+    /// found ones are remembered, since a thread T3 starts later can still show up.
+    fn thread_of(&mut self, session: &str) -> rusqlite::Result<Option<String>> {
+        if let Some(thread) = self.threads.get(session) {
+            return Ok(Some(thread.clone()));
         }
-        self.threads.as_ref()?.get(session).cloned()
+        let found = self.conn.query_row(THREAD, [session], |r| r.get::<_, String>(0)).optional()?;
+        if let Some(thread) = &found {
+            self.threads.insert(session.to_owned(), thread.clone());
+        }
+        Ok(found)
     }
 
     /// Whether T3 started this Claude Code or Codex session (and still knows it).
     pub(crate) fn knows(&mut self, session: &str) -> bool {
-        self.thread_of(session).is_some()
+        matches!(self.thread_of(session), Ok(Some(_)))
     }
 
     /// Whether the person wrote the prompt T3 sent to `session` at `t`, found by its
     /// fingerprint (`claude::prompt_key`). `thread` is the thread the hook was told, if
-    /// any. None when T3's database can't say: the session isn't one T3 started (a
-    /// Claude Code that an agent runs inside a T3 thread gets T3's environment too), it
-    /// belongs to another thread, or the database can't be read.
-    pub(crate) fn typed(&mut self, session: &str, thread: Option<&str>, t: DateTime<Utc>, key: &str) -> Option<bool> {
-        let owner = self.thread_of(session)?;
+    /// any. A Claude Code that an agent runs inside a T3 thread gets T3's environment
+    /// too, but T3 didn't start its session, so that's `NotT3s`.
+    pub(crate) fn typed(&mut self, session: &str, thread: Option<&str>, t: DateTime<Utc>, key: &str) -> Says {
+        let owner = match self.thread_of(session) {
+            Ok(Some(owner)) => owner,
+            Ok(None) => return Says::NotT3s,
+            Err(_) => return Says::Unreadable,
+        };
         if thread.is_some_and(|th| th != owner) {
-            return None;
+            return Says::NotT3s;
         }
+        match self.messages(&owner, t) {
+            Ok(messages) => Says::Typed(decide(&messages, t, key)),
+            Err(_) => Says::Unreadable,
+        }
+    }
+
+    /// The thread's latest messages from before `t`, newest first.
+    fn messages(&self, thread: &str, t: DateTime<Utc>) -> rusqlite::Result<Vec<Message>> {
         // T3 saves a message before it sends it, so the prompt's message is never newer.
         let until = (t + chrono::Duration::seconds(2)).to_rfc3339_opts(SecondsFormat::Millis, true);
-        let mut stmt = self.conn.prepare(MESSAGES).ok()?;
-        let rows = stmt
-            .query_map(rusqlite::params![owner, until, RECENT], |r| {
-                Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?))
-            })
-            .ok()?;
-        let messages: Vec<Message> = rows
-            .flatten()
-            .filter_map(|(id, at, payload)| {
-                let at = DateTime::parse_from_rfc3339(&at).ok()?.with_timezone(&Utc);
-                Some(Message { id, at, payload: serde_json::from_str(&payload).ok()? })
-            })
-            .collect();
-        Some(decide(&messages, t, key))
+        let mut stmt = self.conn.prepare(MESSAGES)?;
+        let rows = stmt.query_map(rusqlite::params![thread, until, RECENT], |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?))
+        })?;
+        let mut out = Vec::new();
+        for row in rows {
+            let (id, at, payload) = row?;
+            let (Ok(at), Ok(payload)) = (DateTime::parse_from_rfc3339(&at), serde_json::from_str::<Value>(&payload)) else { continue };
+            out.push(Message { id, at: at.with_timezone(&Utc), payload });
+        }
+        Ok(out)
     }
 }
 
@@ -232,28 +249,31 @@ pub(crate) mod tests {
         );
         let mut db = Db::open(&path).unwrap();
         let mut typed = |s: i64, text: &str| db.typed("s1", Some("th1"), at(s), &crate::claude::prompt_key(text));
+        let (person, agent) = (Says::Typed(true), Says::Typed(false));
 
-        assert_eq!(typed(1, "make the snake move faster"), Some(true));
-        assert_eq!(typed(21, "Act as the reviewer sub-agent for this task.\n\nreview the diff"), Some(false));
-        assert_eq!(typed(41, "check the inbox"), Some(false), "a scheduled task");
+        assert_eq!(typed(1, "make the snake move faster"), person);
+        assert_eq!(typed(21, "Act as the reviewer sub-agent for this task.\n\nreview the diff"), agent);
+        assert_eq!(typed(41, "check the inbox"), agent, "a scheduled task");
         // T3 added where the screenshot is saved, so the text doesn't match. It's the
         // newest message, and the person sent it from their phone.
-        assert_eq!(typed(61, "look at this screenshot\n\n[Attached image \"shot.png\" is saved at: /tmp/shot.png]"), Some(true));
-        assert_eq!(typed(81, "Which database?\nsqlite"), Some(false), "an answer T3 passed on");
+        assert_eq!(typed(61, "look at this screenshot\n\n[Attached image \"shot.png\" is saved at: /tmp/shot.png]"), person);
+        assert_eq!(typed(81, "Which database?\nsqlite"), agent, "an answer T3 passed on");
         // The same text twice: the newest one is the one just sent.
-        assert_eq!(typed(101, "continue"), Some(true));
-        assert_eq!(typed(121, "continue"), Some(false));
-        assert_eq!(typed(131, "/compact"), Some(false), "T3's own /compact");
+        assert_eq!(typed(101, "continue"), person);
+        assert_eq!(typed(121, "continue"), agent);
+        assert_eq!(typed(131, "/compact"), agent, "T3's own /compact");
         // Nothing recent in the thread matches.
-        assert_eq!(typed(3600, "add a pause menu"), Some(false));
+        assert_eq!(typed(3600, "add a pause menu"), agent);
         // A message saved after the prompt isn't where it came from.
-        assert_eq!(typed(-30, "make the snake move faster"), Some(false));
+        assert_eq!(typed(-30, "make the snake move faster"), agent);
 
         // Sessions T3 doesn't know (a Claude Code an agent started), or another thread's.
-        assert_eq!(db.typed("s9", Some("th1"), at(1), &crate::claude::prompt_key("make the snake move faster")), None);
-        assert_eq!(db.typed("s1", Some("th2"), at(1), &crate::claude::prompt_key("make the snake move faster")), None);
+        let key = crate::claude::prompt_key("make the snake move faster");
+        assert_eq!(db.typed("s9", Some("th1"), at(1), &key), Says::NotT3s);
+        assert_eq!(db.typed("s1", Some("th2"), at(1), &key), Says::NotT3s);
         // Codex prompts don't come with a thread, only the session.
-        assert_eq!(db.typed("s1", None, at(1), &crate::claude::prompt_key("make the snake move faster")), Some(true));
+        assert_eq!(db.typed("s1", None, at(1), &key), person);
+        assert!(db.knows("s1") && !db.knows("s9"));
         drop(db);
 
         assert!(Db::open(&std::env::temp_dir().join(format!("steer-t3-none-{}.sqlite", crate::live::new_id()))).is_none());

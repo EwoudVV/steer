@@ -5,6 +5,7 @@
 //! and never leaves this computer.
 
 use crate::prompt::PromptInfo;
+use crate::t3::Says;
 use chrono::{DateTime, SecondsFormat, Utc};
 use serde_json::{json, Map, Value};
 use std::collections::{HashMap, HashSet};
@@ -172,14 +173,17 @@ fn record() -> Option<()> {
             if crate::claude::injected(text) {
                 return None;
             }
-            let mut e = prompt_event(new_id(), session, &project, "claude-code", Utc::now(), &PromptInfo::analyze(text, 0));
+            // Prompts from T3 Code also get looked up in its database (see t3.rs).
+            let t3 = crate::t3::hook_check(&v);
+            let info = PromptInfo::analyze(text, 0);
+            let mut e = prompt_event_as(new_id(), session, &project, "claude-code", Utc::now(), &info, t3.is_none());
             if let Some(log) = v.get("transcript_path").and_then(Value::as_str) {
                 e["check"] = json!({ "log": log, "key": crate::claude::prompt_key(text) });
             }
-            // Prompts from T3 Code also get looked up in its database (see t3.rs).
-            if let Some(t3) = crate::t3::hook_check(&v) {
+            if let Some(t3) = t3 {
                 e["check"]["key"] = crate::claude::prompt_key(text).into();
                 e["check"]["t3"] = t3;
+                e["check"]["words"] = words(&info);
             }
             e
         }
@@ -226,6 +230,21 @@ pub(crate) fn prompt_event(
     t: DateTime<Utc>,
     p: &PromptInfo,
 ) -> Value {
+    prompt_event_as(id, session, project, via, t, p, true)
+}
+
+/// `remember`: whether the session's next prompt gets compared with this one (see
+/// `is_repeat`). A prompt that may still turn out to be an agent's waits until it's
+/// sent, with its words in `check` (see `send_files`).
+pub(crate) fn prompt_event_as(
+    id: String,
+    session: &str,
+    project: &str,
+    via: &str,
+    t: DateTime<Utc>,
+    p: &PromptInfo,
+    remember: bool,
+) -> Value {
     let mut e = event(id, session, project, via, t, "prompt");
     e["words"] = p.words.into();
     e["chars"] = p.chars.into();
@@ -233,8 +252,13 @@ pub(crate) fn prompt_event(
     e["specific"] = p.specific.into();
     e["observation"] = p.observation.into();
     e["generic"] = p.generic.into();
-    e["repeat"] = is_repeat(session, p).into();
+    e["repeat"] = is_repeat(session, p, remember).into();
     e
+}
+
+/// The word fingerprints `is_repeat` compares, as they're saved.
+pub(crate) fn words(p: &PromptInfo) -> Value {
+    p.word_hashes().iter().map(|h| Value::from(*h)).collect()
 }
 
 /// Adds events to the queue on this computer. They get sent by `flush`.
@@ -300,23 +324,36 @@ pub(crate) fn known_roots() -> Vec<(String, PathBuf)> {
 
 /// Compares the prompt to the previous one in the same session. Only word hashes of the
 /// last prompt per session are kept, in ~/.steer/last-prompts.json.
-fn is_repeat(session: &str, p: &PromptInfo) -> bool {
-    is_repeat_in(&dir().join("last-prompts.json"), session, p)
+fn is_repeat(session: &str, p: &PromptInfo, remember: bool) -> bool {
+    is_repeat_in(&dir().join("last-prompts.json"), session, p, remember)
+}
+
+/// Makes a prompt that was waiting for its verdict the one the session's next prompt
+/// gets compared with.
+fn remember_words(session: &str, words: &Value) {
+    let path = dir().join("last-prompts.json");
+    let saved = fs::read_to_string(&path).ok().and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default();
+    save_words(&path, saved, session, words.clone());
 }
 
 const SAVED_SESSIONS: usize = 50;
 
-fn is_repeat_in(path: &Path, session: &str, p: &PromptInfo) -> bool {
-    let mut saved: Map<String, Value> = fs::read_to_string(path)
+fn is_repeat_in(path: &Path, session: &str, p: &PromptInfo, remember: bool) -> bool {
+    let saved: Map<String, Value> = fs::read_to_string(path)
         .ok()
         .and_then(|s| serde_json::from_str(&s).ok())
         .unwrap_or_default();
     let previous = saved.get(session).and_then(saved_hashes);
     let repeat = previous.is_some_and(|prev| p.words >= 3 && p.similarity_to(&prev) >= 0.6);
+    if remember {
+        save_words(path, saved, session, words(p));
+    }
+    repeat
+}
 
+fn save_words(path: &Path, mut saved: Map<String, Value>, session: &str, words: Value) {
     let now = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
-    let hashes: Vec<Value> = p.word_hashes().iter().map(|h| (*h).into()).collect();
-    saved.insert(session.to_owned(), json!({ "t": now, "h": hashes }));
+    saved.insert(session.to_owned(), json!({ "t": now, "h": words }));
 
     // Keep the sessions used most recently. serde_json's Map is sorted by key, not by
     // when things were added, so the oldest has to be found by its time. The current
@@ -335,7 +372,6 @@ fn is_repeat_in(path: &Path, session: &str, p: &PromptInfo) -> bool {
         }
     }
     let _ = fs::write(path, Value::Object(saved).to_string());
-    repeat
 }
 
 /// Reads a saved entry: {"t": secs, "h": [hashes]}, or just [hashes] from older versions.
@@ -418,9 +454,11 @@ type T3Dbs = HashMap<String, Option<crate::t3::Db>>;
 /// can't lose real prompts.
 ///
 /// T3 Code sends its agents' messages through the Agent SDK too, the same way as what
-/// the person types, so for its prompts the log can't say. Those carry `check.t3`, and
-/// T3's own database decides (see t3.rs). Codex prompts have no log to look in, so for
-/// them only T3's database is asked.
+/// the person types, so for its prompts the log can't say. The hook marks prompts from a
+/// Claude Code that T3 started (`check.t3`), and T3's own database decides those (see
+/// t3.rs): only the ones it says the person wrote get sent. That includes the ones that
+/// never show up in the log, which is what happens to a message sent while the agent is
+/// busy. Codex prompts have no log to look in, so for them only T3's database is asked.
 fn verdict(e: &Value, now: DateTime<Utc>, logs: &mut HashMap<String, Vec<LogPrompt>>, t3: &mut T3Dbs) -> Verdict {
     let Some(check) = e.get("check") else { return Verdict::Send };
     let Some(key) = check["key"].as_str() else { return Verdict::Send };
@@ -432,10 +470,20 @@ fn verdict(e: &Value, now: DateTime<Utc>, logs: &mut HashMap<String, Vec<LogProm
     if check["t3"]["agent"] == true {
         return Verdict::Drop;
     }
+    // When T3's database can't be read it's tried again on the next flush, for a few
+    // minutes: the server doesn't take events more than 5 minutes old.
+    let t3_decides = |says: Says| match says {
+        Says::Typed(true) => Verdict::Send,
+        Says::Unreadable if (now - t).num_seconds() < 240 => Verdict::Wait,
+        _ => Verdict::Drop,
+    };
     let Some(path) = check["log"].as_str() else {
+        // Codex. A session T3 didn't start is sent like before.
+        let from_t3 = check["t3"]["codex"] == "t3";
         return match t3_typed(e, t, key, t3) {
-            Some(false) => Verdict::Drop,
-            _ => Verdict::Send,
+            Says::Typed(typed) => if typed { Verdict::Send } else { Verdict::Drop },
+            _ if !from_t3 => Verdict::Send,
+            says => t3_decides(says),
         };
     };
     let lines = logs.entry(path.to_owned()).or_insert_with(|| log_prompts(Path::new(path)));
@@ -443,9 +491,7 @@ fn verdict(e: &Value, now: DateTime<Utc>, logs: &mut HashMap<String, Vec<LogProm
         lines.iter().filter(|(lt, _, _, _)| (-10..=60).contains(&(*lt - t).num_seconds())).collect();
     if let Some((_, _, typed, sdk)) = near.iter().find(|(_, k, _, _)| k == key) {
         if *sdk && in_t3 {
-            if let Some(typed) = t3_typed(e, t, key, t3) {
-                return if typed { Verdict::Send } else { Verdict::Drop };
-            }
+            return t3_decides(t3_typed(e, t, key, t3));
         }
         return if *typed { Verdict::Send } else { Verdict::Drop };
     }
@@ -453,9 +499,7 @@ fn verdict(e: &Value, now: DateTime<Utc>, logs: &mut HashMap<String, Vec<LogProm
         return Verdict::Wait;
     }
     if in_t3 {
-        if let Some(typed) = t3_typed(e, t, key, t3) {
-            return if typed { Verdict::Send } else { Verdict::Drop };
-        }
+        return t3_decides(t3_typed(e, t, key, t3));
     }
     // Never found its own line. If everything around it in the log was not typed, it
     // wasn't either.
@@ -466,13 +510,14 @@ fn verdict(e: &Value, now: DateTime<Utc>, logs: &mut HashMap<String, Vec<LogProm
     }
 }
 
-/// Asks T3 Code's database whether the person wrote a prompt. None if it can't say.
-fn t3_typed(e: &Value, t: DateTime<Utc>, key: &str, dbs: &mut T3Dbs) -> Option<bool> {
+/// Asks T3 Code's database whether the person wrote a prompt.
+fn t3_typed(e: &Value, t: DateTime<Utc>, key: &str, dbs: &mut T3Dbs) -> Says {
     let check = &e["check"]["t3"];
-    let path = check["db"].as_str()?;
-    let session = e["session"].as_str()?;
-    let db = dbs.entry(path.to_owned()).or_insert_with(|| crate::t3::Db::open(Path::new(path))).as_mut()?;
-    db.typed(session, check["thread"].as_str(), t, key)
+    let (Some(path), Some(session)) = (check["db"].as_str(), e["session"].as_str()) else { return Says::Unreadable };
+    match dbs.entry(path.to_owned()).or_insert_with(|| crate::t3::Db::open(Path::new(path))) {
+        Some(db) => db.typed(session, check["thread"].as_str(), t, key),
+        None => Says::Unreadable,
+    }
 }
 
 /// The prompts near the end of a Claude Code log: when, the fingerprint of the text, and
@@ -534,8 +579,11 @@ fn send_files(config: &Config, waiting: &mut Vec<Value>) -> Result<usize, String
             for mut e in events {
                 match verdict(&e, now, &mut logs, &mut t3) {
                     Verdict::Send => {
+                        if let (Some(session), words @ Value::Array(_)) = (e["session"].as_str(), &e["check"]["words"]) {
+                            remember_words(session, words);
+                        }
                         if let Some(o) = e.as_object_mut() {
-                            o.remove("check"); // the log's path and T3's thread never leave this computer
+                            o.remove("check"); // the log's path, T3's thread and the words never leave this computer
                         }
                         ready.push(e);
                     }
@@ -1136,13 +1184,13 @@ mod tests {
         let path = std::env::temp_dir().join(format!("steer-last-{}.json", new_id()));
         let filler = PromptInfo::analyze("add a settings page with a dark mode toggle", 0);
         for i in 0..SAVED_SESSIONS + 10 {
-            is_repeat_in(&path, &format!("zzz-{i:03}"), &filler);
+            is_repeat_in(&path, &format!("zzz-{i:03}"), &filler, true);
         }
         // "aaa" sorts before every other session, which used to get it thrown out.
         let first = PromptInfo::analyze("make the snake move faster when it eats food", 0);
         let again = PromptInfo::analyze("make the snake move faster when it eats food please", 0);
-        assert!(!is_repeat_in(&path, "aaa", &first));
-        assert!(is_repeat_in(&path, "aaa", &again));
+        assert!(!is_repeat_in(&path, "aaa", &first, true));
+        assert!(is_repeat_in(&path, "aaa", &again, true));
 
         let saved: Map<String, Value> = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
         assert_eq!(saved.len(), SAVED_SESSIONS);
@@ -1227,8 +1275,11 @@ mod tests {
             json!({ "type": "user", "timestamp": stamp(s), "entrypoint": "t3-code", "promptSource": "sdk", "turnOrigin": "sdk", "message": { "role": "user", "content": text } })
         };
         let notice = json!({ "type": "user", "timestamp": stamp(20), "entrypoint": "t3-code", "origin": { "kind": "task-notification" }, "turnOrigin": "task_notification", "message": { "role": "user", "content": "Background command finished" } });
+        // `claude -p` from a Codex agent's shell gets T3's thread but isn't marked "t3-code".
+        let mut nested = sdk(30, "review the diff and list the risks");
+        nested["entrypoint"] = "sdk-cli".into();
         let log = tmp.join("session.jsonl");
-        let lines = [sdk(0, "add a pause menu"), sdk(10, "The tests pass now, merge it"), notice];
+        let lines = [sdk(0, "add a pause menu"), sdk(10, "The tests pass now, merge it"), notice, nested];
         fs::write(&log, lines.iter().map(|l| format!("{l}\n")).collect::<String>()).unwrap();
 
         let in_t3 = json!({ "db": db.to_string_lossy(), "thread": "th1", "agent": false });
@@ -1245,27 +1296,36 @@ mod tests {
         // What the log says isn't from T3 at all still doesn't count.
         assert!(matches!(verdict_of(hooked("s1", "Background command finished", 20, &in_t3)), Verdict::Drop));
         // A Claude Code an agent started inside the thread has T3's environment, but T3
-        // doesn't know its session, and from the log alone T3's prompts don't count.
+        // doesn't know its session. Same when its lines aren't marked "t3-code".
         assert!(matches!(verdict_of(hooked("s2", "add a pause menu", 0, &in_t3)), Verdict::Drop));
+        assert!(matches!(verdict_of(hooked("s3", "review the diff and list the risks", 30, &in_t3)), Verdict::Drop));
         // A subagent's prompt.
         let mut agent = in_t3.clone();
         agent["agent"] = true.into();
         assert!(matches!(verdict_of(hooked("s1", "add a pause menu", 0, &agent)), Verdict::Drop));
-        // T3's database can't be read: the log alone decides.
-        let gone = json!({ "db": tmp.join("gone.sqlite").to_string_lossy(), "thread": "th1", "agent": false });
-        assert!(matches!(verdict_of(hooked("s1", "add a pause menu", 0, &gone)), Verdict::Drop));
 
-        // Codex prompts have no Claude Code log. One from a session T3 doesn't know is sent
-        // like before.
-        let codex = |session: &str, text: &str, s: i64| {
+        // Codex prompts have no Claude Code log. One from a session T3 didn't start is sent
+        // like before, and T3's own are only sent if its database says the person wrote them.
+        let codex = |session: &str, text: &str, s: i64, from_t3: bool| {
             let mut e = event(new_id(), session, "game", "codex", at(s), "prompt");
             e["check"] = json!({ "key": crate::claude::prompt_key(text), "t3": { "db": db.to_string_lossy() } });
+            if from_t3 {
+                e["check"]["t3"]["codex"] = "t3".into();
+            }
             e
         };
-        assert!(matches!(verdict_of(codex("s1", "add a pause menu", 0)), Verdict::Send));
-        assert!(matches!(verdict_of(codex("s1", "The tests pass now, merge it", 10)), Verdict::Drop));
-        assert!(matches!(verdict_of(codex("not-t3", "add a pause menu", 0)), Verdict::Send));
+        assert!(matches!(verdict_of(codex("s1", "add a pause menu", 0, true)), Verdict::Send));
+        assert!(matches!(verdict_of(codex("s1", "The tests pass now, merge it", 10, false)), Verdict::Drop));
+        assert!(matches!(verdict_of(codex("not-t3", "add a pause menu", 0, false)), Verdict::Send));
+        assert!(matches!(verdict_of(codex("unknown-to-t3", "add a pause menu", 0, true)), Verdict::Drop));
         drop(dbs);
+
+        // T3's database can't be read: try again for a few minutes, then don't count it.
+        let gone = json!({ "db": tmp.join("gone.sqlite").to_string_lossy(), "thread": "th1", "agent": false });
+        let mut nothing = HashMap::new();
+        let e = hooked("s1", "add a pause menu", 0, &gone);
+        assert!(matches!(verdict(&e, at(90), &mut logs, &mut nothing), Verdict::Wait));
+        assert!(matches!(verdict(&e, at(300), &mut logs, &mut nothing), Verdict::Drop));
         let _ = fs::remove_dir_all(&tmp);
     }
 

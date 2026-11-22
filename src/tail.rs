@@ -10,10 +10,12 @@ use std::path::{Path, PathBuf};
 const MAX_READ: u64 = 32 * 1024 * 1024;
 
 /// The session and project the lines of one file belong to. A reader can change the
-/// project partway through, e.g. when the session moves to another folder.
+/// project partway through, e.g. when the session moves to another folder. `tags` is
+/// whatever else the reader noted about the file when it first saw it.
 pub struct Ctx {
     pub session: String,
     pub project: String,
+    pub tags: Value,
 }
 
 /// Every .jsonl file under `dir`, at any depth.
@@ -37,7 +39,7 @@ pub fn poll(
     files: Vec<PathBuf>,
     state: &mut Map<String, Value>,
     skip_existing: bool,
-    meta: impl Fn(&Path) -> (String, String),
+    meta: impl Fn(&Path) -> (String, String, Value),
     mut parse: impl FnMut(&Value, &mut Ctx, u64) -> Option<Value>,
 ) -> Vec<Value> {
     let mut out = Vec::new();
@@ -54,14 +56,19 @@ pub fn poll(
         if len == offset {
             continue;
         }
-        if entry.get("session").is_none() {
-            let (session, project) = meta(&path);
-            entry["session"] = session.into();
-            entry["project"] = project.into();
+        // Files first seen by an older version have no tags yet.
+        if entry.get("session").is_none() || entry.get("tags").is_none() {
+            let (session, project, tags) = meta(&path);
+            if entry.get("session").is_none() {
+                entry["session"] = session.into();
+                entry["project"] = project.into();
+            }
+            entry["tags"] = tags;
         }
         let mut ctx = Ctx {
             session: entry["session"].as_str().unwrap_or_default().to_owned(),
             project: entry["project"].as_str().unwrap_or("unknown").to_owned(),
+            tags: entry["tags"].clone(),
         };
 
         let Ok(mut file) = File::open(&path) else { continue };

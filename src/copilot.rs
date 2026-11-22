@@ -30,7 +30,7 @@ pub fn poll(state: &mut Map<String, Value>, skip_existing: bool) -> Vec<Value> {
         files,
         state,
         skip_existing,
-        |path| (session_of(path), project_name(&read_cwd(path).unwrap_or_default())),
+        |path| (session_of(path), project_name(&read_cwd(path).unwrap_or_default()), Value::Null),
         |v, ctx, line_offset| {
             if v.get("type").and_then(Value::as_str) == Some("session.start") {
                 if let Some(cwd) = cwd_of(v) {

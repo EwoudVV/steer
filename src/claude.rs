@@ -42,8 +42,9 @@ pub fn parse_session(path: &Path, mut t3: Option<&mut crate::t3::Db>) -> Option<
     let mut ai_title = None;
     let mut session = None;
     // T3 only started marking its lines "t3-code" in November 2026, so one marked line
-    // makes the whole session T3's. Until the end, turns that came in through the SDK
-    // are kept aside as (index in events, time, fingerprint).
+    // makes the whole session T3's, and so do T3's own tools (mcp__t3-code__...), which
+    // every agent T3 runs gets and the log lists. Until the end, turns that came in
+    // through the SDK are kept aside as (index in events, time, fingerprint).
     let mut ran_by_t3 = false;
     let mut sdk_turns = Vec::new();
 
@@ -51,6 +52,9 @@ pub fn parse_session(path: &Path, mut t3: Option<&mut crate::t3::Db>) -> Option<
         let Ok(line) = line else { continue };
         let Ok(v) = serde_json::from_str::<Value>(&line) else { continue };
         let ty = v.get("type").and_then(Value::as_str).unwrap_or_default();
+        if matches!(ty, "attachment" | "assistant") && line.contains("\"mcp__t3-code__") {
+            ran_by_t3 = true;
+        }
         match ty {
             "custom-title" => {
                 custom_title = str_field(&v, "customTitle");
@@ -98,7 +102,7 @@ pub fn parse_session(path: &Path, mut t3: Option<&mut crate::t3::Db>) -> Option<
         let mut unverified = std::collections::HashSet::new();
         for (i, t, key) in &sdk_turns {
             let typed = match (t3.as_deref_mut(), session) {
-                (Some(db), Some(s)) => db.typed(s, None, *t, key) == Some(true),
+                (Some(db), Some(s)) => db.typed(s, None, *t, key) == crate::t3::Says::Typed(true),
                 _ => false,
             };
             if !typed {
@@ -164,7 +168,7 @@ fn typed_in_t3(v: &Value, t: DateTime<Utc>, db: Option<&mut crate::t3::Db>) -> O
     }
     let session = v.get("sessionId").and_then(Value::as_str)?;
     let (_, text, _) = prompt_line(v)?;
-    db.typed(session, None, t, &prompt_key(&text))?.then(|| user_event_as(v, t, true)).flatten()
+    (db.typed(session, None, t, &prompt_key(&text)) == crate::t3::Says::Typed(true)).then(|| user_event_as(v, t, true)).flatten()
 }
 
 /// `sdk_typed`: whether a turn that came in through the Agent SDK is the person typing.
@@ -408,6 +412,12 @@ mod tests {
         };
         assert_eq!(prompts(log.as_path(), None), 0);
         assert_eq!(prompts(other.as_path(), None), 1);
+        // An older T3 session with no marked line at all, but T3's tools in the log.
+        let tools = tmp.join("s8.jsonl");
+        older["sessionId"] = "s8".into();
+        let listed = json!({ "type": "attachment", "attachment": { "type": "deferred_tools_delta", "addedNames": ["Read", "mcp__t3-code__delegate_task"] } });
+        fs::write(&tools, format!("{older}\n{listed}\n")).unwrap();
+        assert_eq!(prompts(tools.as_path(), None), 0);
         let mut t3 = crate::t3::Db::open(&db).unwrap();
         assert_eq!(prompts(log.as_path(), Some(&mut t3)), 2, "only the ones the person typed");
         assert_eq!(prompts(other.as_path(), Some(&mut t3)), 1);

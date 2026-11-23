@@ -33,13 +33,13 @@ pub fn jsonl_files(dir: &Path, out: &mut Vec<PathBuf>) {
 
 /// Reads what's new in each file and turns it into events with `parse`. `state` keeps,
 /// per file, how far it's been read plus its session and project (from `meta` the first
-/// time a file is seen). With `skip_existing`, files seen for the first time are skipped
-/// to their end, so old history isn't sent.
+/// time a file is seen, or the next time if `meta` can't tell yet). With `skip_existing`,
+/// files seen for the first time are skipped to their end, so old history isn't sent.
 pub fn poll(
     files: Vec<PathBuf>,
     state: &mut Map<String, Value>,
     skip_existing: bool,
-    meta: impl Fn(&Path) -> (String, String, Value),
+    meta: impl Fn(&Path) -> Option<(String, String, Value)>,
     mut parse: impl FnMut(&Value, &mut Ctx, u64) -> Option<Value>,
 ) -> Vec<Value> {
     let mut out = Vec::new();
@@ -58,7 +58,7 @@ pub fn poll(
         }
         // Files first seen by an older version have no tags yet.
         if entry.get("session").is_none() || entry.get("tags").is_none() {
-            let (session, project, tags) = meta(&path);
+            let Some((session, project, tags)) = meta(&path) else { continue };
             if entry.get("session").is_none() {
                 entry["session"] = session.into();
                 entry["project"] = project.into();

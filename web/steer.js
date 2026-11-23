@@ -137,7 +137,12 @@ export class SessionReader {
   }
 
   line(s) {
-    if (s && s.includes(T3_TOOLS) && (s.includes('"type":"attachment"') || s.includes('"type":"assistant"'))) this.t3 = true;
+    if (s && !this.t3 && s.includes(T3_TOOLS)) {
+      try {
+        const ty = JSON.parse(s)?.type;
+        if (ty === "attachment" || ty === "assistant") this.t3 = true;
+      } catch {}
+    }
     if (!s || !WANTED.some((w) => s.includes(w))) return;
     let v;
     try {
@@ -158,7 +163,7 @@ export class SessionReader {
     const e = ty === "assistant" ? assistantEvent(v, t) : userEvent(v, t);
     if (e) {
       e.id = str(v.uuid);
-      if (ty === "user" && sentBySdk(v)) this.sdk.push(this.events.length);
+      if (ty === "user" && e.kind !== "agent" && e.kind !== "rejected" && sentBySdk(v)) this.sdk.push(this.events.length);
       this.events.push(e);
     }
   }

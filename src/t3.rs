@@ -22,24 +22,32 @@ use std::time::Duration;
 /// How many of a thread's latest messages a prompt is matched against. A queued message
 /// can wait hours before T3 sends it, so this is a count and not a time window.
 const RECENT: i64 = 20;
-/// A prompt whose text matches none of them (T3 added the paths of attached files, say)
-/// is the thread's newest message, if that one is at most this old (seconds).
-const NEWEST_WITHIN: i64 = 15 * 60;
+/// A prompt whose text matches none of them (T3 changed it on the way) is the newest
+/// message T3 has started sending, if that happened at most this long ago (seconds).
+const NEWEST_WITHIN: i64 = 5 * 60;
 
 /// Nothing indexes the session id, but the table is small (a row per thread T3 runs an
 /// agent in), so going through it is quick.
 const THREAD: &str = "select thread_id from orchestration_v2_projection_provider_threads
     where json_extract(payload_json, '$.nativeThreadRef.nativeId') = ?1 and thread_id is not null limit 1";
-/// Uses T3's index on (thread_id, created_at), so it never reads the whole table.
-const MESSAGES: &str = "select message_id, created_at, payload_json from orchestration_v2_projection_messages
-    where thread_id = ?1 and role = 'user' and created_at <= ?2 order by created_at desc limit ?3";
+/// Uses T3's index on (thread_id, created_at), so it never reads the whole table. A
+/// message's run says when T3 started sending it, so a message still waiting in the
+/// queue isn't taken for the one just sent.
+const MESSAGES: &str = "select m.message_id, m.created_at, m.payload_json, json_extract(r.payload_json, '$.startedAt')
+    from orchestration_v2_projection_messages m left join orchestration_v2_projection_runs r on r.run_id = m.run_id
+    where m.thread_id = ?1 and m.role = 'user' and m.created_at <= ?2 order by m.created_at desc limit ?3";
 
 /// T3's database, if it's on this computer.
 pub(crate) fn db_path() -> Option<PathBuf> {
-    let base = std::env::var_os("T3CODE_HOME")
-        .filter(|s| !s.is_empty())
-        .map(PathBuf::from)
-        .unwrap_or_else(|| home().join(".t3"));
+    // T3 turns a leading ~ into the home folder itself.
+    let base = match std::env::var("T3CODE_HOME").ok().filter(|s| !s.is_empty()) {
+        Some(h) if h == "~" => home(),
+        Some(h) => match h.strip_prefix("~/").or_else(|| h.strip_prefix("~\\")) {
+            Some(rest) => home().join(rest),
+            None => PathBuf::from(h),
+        },
+        None => home().join(".t3"),
+    };
     // "dev" is where T3 keeps it when it runs from its source.
     ["userdata", "dev"].iter().map(|d| base.join(d).join("statev2.sqlite")).find(|p| p.exists())
 }
@@ -91,11 +99,12 @@ pub(crate) fn typed_part(prompt: &str) -> (&str, usize) {
 /// here because the flush that looks the prompt up can run in a process T3 didn't start.
 pub(crate) fn hook_check(input: &Value) -> Option<Value> {
     let thread = std::env::var("T3CODE_THREAD_ID").ok().filter(|t| !t.is_empty())?;
-    let db = db_path()?;
+    // Without its database T3's prompts can't be told apart, so they don't count.
+    let db = db_path().map(|d| d.to_string_lossy().into_owned());
     // Subagents and agent team members run inside the same Claude Code, so they get the
     // same thread. What they're sent comes from the agent that started them.
     let agent = input.get("agent_id").is_some_and(|a| !a.is_null());
-    Some(json!({ "db": db.to_string_lossy().into_owned(), "thread": thread, "agent": agent }))
+    Some(json!({ "db": db, "thread": thread, "agent": agent }))
 }
 
 /// For `steer doctor`: None if T3 isn't on this computer, otherwise where its database
@@ -127,11 +136,15 @@ pub(crate) struct Db {
     conn: Connection,
     /// Sessions already looked up, and the T3 thread each one belongs to.
     threads: HashMap<String, String>,
+    /// What the person wrote, from the last message `typed` found was theirs.
+    wrote: Option<(String, usize)>,
 }
 
 struct Message {
     id: String,
     at: DateTime<Utc>,
+    /// When T3 started sending it, if it has.
+    started: Option<DateTime<Utc>>,
     payload: Value,
 }
 
@@ -139,7 +152,7 @@ impl Db {
     pub(crate) fn open(path: &Path) -> Option<Db> {
         let conn = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX).ok()?;
         let _ = conn.busy_timeout(Duration::from_millis(500));
-        Some(Db { conn, threads: HashMap::new() })
+        Some(Db { conn, threads: HashMap::new(), wrote: None })
     }
 
     /// The T3 thread a Claude Code or Codex session belongs to, if T3 started it. Only
@@ -166,6 +179,7 @@ impl Db {
     /// any. A Claude Code that an agent runs inside a T3 thread gets T3's environment
     /// too, but T3 didn't start its session, so that's `NotT3s`.
     pub(crate) fn typed(&mut self, session: &str, thread: Option<&str>, t: DateTime<Utc>, key: &str) -> Says {
+        self.wrote = None;
         let owner = match self.thread_of(session) {
             Ok(Some(owner)) => owner,
             Ok(None) => return Says::NotT3s,
@@ -174,10 +188,25 @@ impl Db {
         if thread.is_some_and(|th| th != owner) {
             return Says::NotT3s;
         }
-        match self.messages(&owner, t) {
-            Ok(messages) => Says::Typed(decide(&messages, t, key)),
-            Err(_) => Says::Unreadable,
+        let messages = match self.messages(&owner, t) {
+            Ok(messages) => messages,
+            Err(_) => return Says::Unreadable,
+        };
+        match decide(&messages, t, key) {
+            Some(m) if by_person(m) => {
+                let images = m.payload["attachments"].as_array().map_or(0, |a| a.iter().filter(|a| a["type"] == "image").count());
+                self.wrote = Some((text(m).to_owned(), images));
+                Says::Typed(true)
+            }
+            _ => Says::Typed(false),
         }
+    }
+
+    /// What the person wrote, as T3 saved it, and how many images they attached: from the
+    /// message the last `typed` found was theirs. T3 adds things to a prompt on the way
+    /// (see `typed_part`), so this is what should count.
+    pub(crate) fn wrote(&self) -> Option<(&str, usize)> {
+        self.wrote.as_ref().map(|(text, images)| (text.as_str(), *images))
     }
 
     /// The thread's latest messages from before `t`, newest first.
@@ -186,13 +215,14 @@ impl Db {
         let until = (t + chrono::Duration::seconds(2)).to_rfc3339_opts(SecondsFormat::Millis, true);
         let mut stmt = self.conn.prepare(MESSAGES)?;
         let rows = stmt.query_map(rusqlite::params![thread, until, RECENT], |r| {
-            Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?))
+            Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?, r.get::<_, Option<String>>(3)?))
         })?;
+        let time = |s: &str| DateTime::parse_from_rfc3339(s).ok().map(|d| d.with_timezone(&Utc));
         let mut out = Vec::new();
         for row in rows {
-            let (id, at, payload) = row?;
-            let (Ok(at), Ok(payload)) = (DateTime::parse_from_rfc3339(&at), serde_json::from_str::<Value>(&payload)) else { continue };
-            out.push(Message { id, at: at.with_timezone(&Utc), payload });
+            let (id, at, payload, started) = row?;
+            let (Some(at), Ok(payload)) = (time(at.as_str()), serde_json::from_str::<Value>(&payload)) else { continue };
+            out.push(Message { id, at, started: started.as_deref().and_then(time), payload });
         }
         Ok(out)
     }
@@ -203,17 +233,19 @@ fn text(m: &Message) -> &str {
     typed_part(m.payload.get("text").and_then(Value::as_str).unwrap_or_default()).0
 }
 
-/// Finds the message a prompt came from in `messages` (newest first) and says whether
-/// the person wrote it.
-fn decide(messages: &[Message], t: DateTime<Utc>, key: &str) -> bool {
-    // The same text can be in a thread more than once ("continue"). The newest one is
-    // the one that was just sent.
-    if let Some(m) = messages.iter().find(|m| crate::claude::prompt_key(text(m)) == key) {
-        return by_person(m);
+/// Finds the message in `messages` (newest first) that a prompt sent at `t` came from.
+fn decide<'a>(messages: &'a [Message], t: DateTime<Utc>, key: &str) -> Option<&'a Message> {
+    let until = t + chrono::Duration::seconds(2);
+    let sent = |m: &&Message| m.started.is_some_and(|s| s <= until);
+    // The same text can be in a thread more than once ("continue"). The newest one T3
+    // has started sending is the one that was just sent.
+    let same: Vec<&Message> = messages.iter().filter(|m| crate::claude::prompt_key(text(m)) == key).collect();
+    if let Some(m) = same.iter().copied().find(sent).or(same.first().copied()) {
+        return Some(m);
     }
-    // Sometimes T3 changes the text on the way (attached files, skills, "Ultrathink:").
-    // It sends a message right after saving it, so then it's the newest one.
-    messages.first().is_some_and(|m| (t - m.at).num_seconds() <= NEWEST_WITHIN && by_person(m))
+    // Sometimes T3 changes the text on the way (skills, links to other threads). Then
+    // it's the newest message T3 has started sending, if that was just now.
+    messages.iter().find(sent).filter(|m| (t - m.at.max(m.started.unwrap_or(m.at))).num_seconds() <= NEWEST_WITHIN)
 }
 
 /// T3's own test for a message the person sent from the app (`sentByUserFromClient` in
@@ -236,13 +268,15 @@ pub(crate) mod tests {
     use super::*;
 
     /// A T3 database with only what steer reads. `sessions` are (thread, session) and
-    /// `messages` are (id, thread, when, payload).
+    /// `messages` are (id, thread, when, payload). T3 starts sending each message when
+    /// it's saved, unless its payload says `"_queued": true`.
     pub(crate) fn fake(path: &Path, sessions: &[(&str, &str)], messages: &[(&str, &str, DateTime<Utc>, Value)]) {
         let conn = Connection::open(path).unwrap();
         conn.execute_batch(
             "create table orchestration_v2_projection_provider_threads (provider_thread_id text primary key, thread_id text, provider text not null, payload_json text not null);
-             create table orchestration_v2_projection_messages (message_id text primary key, thread_id text not null, role text not null, created_at text not null, payload_json text not null);
-             create index messages_by_thread on orchestration_v2_projection_messages (thread_id, created_at, message_id);",
+             create table orchestration_v2_projection_messages (message_id text primary key, thread_id text not null, run_id text, role text not null, created_at text not null, payload_json text not null);
+             create index messages_by_thread on orchestration_v2_projection_messages (thread_id, created_at, message_id);
+             create table orchestration_v2_projection_runs (run_id text primary key, thread_id text not null, payload_json text not null);",
         )
         .unwrap();
         for (i, (thread, session)) in sessions.iter().enumerate() {
@@ -254,9 +288,16 @@ pub(crate) mod tests {
             .unwrap();
         }
         for (id, thread, at, payload) in messages {
+            let when = at.to_rfc3339_opts(SecondsFormat::Millis, true);
+            let run = if payload["_queued"] == true { json!({}) } else { json!({ "startedAt": when.clone() }) };
             conn.execute(
-                "insert into orchestration_v2_projection_messages values (?1, ?2, 'user', ?3, ?4)",
-                rusqlite::params![id, thread, at.to_rfc3339_opts(SecondsFormat::Millis, true), payload.to_string()],
+                "insert into orchestration_v2_projection_messages values (?1, ?2, ?3, 'user', ?4, ?5)",
+                rusqlite::params![id, thread, format!("run-{id}"), when, payload.to_string()],
+            )
+            .unwrap();
+            conn.execute(
+                "insert into orchestration_v2_projection_runs values (?1, ?2, ?3)",
+                rusqlite::params![format!("run-{id}"), thread, run.to_string()],
             )
             .unwrap();
         }
@@ -334,7 +375,27 @@ pub(crate) mod tests {
         // Codex prompts don't come with a thread, only the session.
         assert_eq!(db.typed("s1", None, at(1), &key), person);
         assert!(db.knows("s1") && !db.knows("s9"));
+        // What counts is what the person wrote, as T3 saved it.
+        assert_eq!(db.typed("s1", Some("th1"), at(1), &key), person);
+        assert_eq!(db.wrote(), Some(("make the snake   move faster", 0)));
+        assert_eq!(db.typed("s1", Some("th1"), at(21), &crate::claude::prompt_key("review the diff")), agent);
+        assert_eq!(db.wrote(), None);
         drop(db);
+
+        // The thread is busy: an agent's message waits in the queue, then the person
+        // queues one. When T3 sends the agent's with its text changed, the person's
+        // message is newer but hasn't started, so it isn't the one that was sent.
+        let busy = std::env::temp_dir().join(format!("steer-t3-busy-{}.sqlite", crate::live::new_id()));
+        let mut queued = by("user", "web", "then add a high score table");
+        queued["_queued"] = true.into();
+        let mut wake = by("agent", "server", "The delegated task finished");
+        wake["attachments"] = json!([{ "type": "image", "mimeType": "image/png" }]);
+        fake(&busy, &[("th1", "s1")], &[("w1", "th1", at(0), wake), ("q1", "th1", at(60), queued)]);
+        let mut db = Db::open(&busy).unwrap();
+        let changed = crate::claude::prompt_key("Note: the T3 server restarted\n\nUser message:\nThe delegated task finished, see the log");
+        assert_eq!(db.typed("s1", Some("th1"), at(120), &changed), agent);
+        drop(db);
+        let _ = std::fs::remove_file(&busy);
 
         assert!(Db::open(&std::env::temp_dir().join(format!("steer-t3-none-{}.sqlite", crate::live::new_id()))).is_none());
         let _ = std::fs::remove_file(&path);

@@ -25,8 +25,8 @@ pub fn poll(state: &mut Map<String, Value>, skip_existing: bool) -> Vec<Value> {
         state,
         skip_existing,
         |path| {
-            let (session, cwd, tags) = read_meta(path).unwrap_or_else(|| (stem(path), String::new(), Value::Null));
-            (session, project_name(&cwd), tags)
+            let (session, cwd, tags) = read_meta(path)?.unwrap_or_else(|| (stem(path), String::new(), Value::Null));
+            Some((session, project_name(&cwd), tags))
         },
         |v, ctx, line_offset| {
             if v.get("type").and_then(Value::as_str) == Some("turn_context") {
@@ -45,11 +45,21 @@ fn stem(path: &Path) -> String {
 
 /// Session id and working folder from the session_meta record on the first line, and
 /// what started the session: T3 Code ("T3 Code", or "t3code_desktop" in older versions)
-/// and whether it's a subagent that another agent started.
-fn read_meta(path: &Path) -> Option<(String, String, Value)> {
+/// and whether it's a subagent that another agent started. None while that line is
+/// still being written, so it gets read again next time, and Some(None) if it can't be
+/// read at all.
+fn read_meta(path: &Path) -> Option<Option<(String, String, Value)>> {
+    const MAX: u64 = 4 * 1024 * 1024;
     let mut first = String::new();
-    BufReader::new(File::open(path).ok()?).take(4 * 1024 * 1024).read_line(&mut first).ok()?;
-    let v: Value = serde_json::from_str(&first).ok()?;
+    BufReader::new(File::open(path).ok()?).take(MAX).read_line(&mut first).ok()?;
+    if !first.ends_with('\n') && (first.len() as u64) < MAX {
+        return None;
+    }
+    Some(parse_meta(&first))
+}
+
+fn parse_meta(first: &str) -> Option<(String, String, Value)> {
+    let v: Value = serde_json::from_str(first).ok()?;
     let p = v.get("payload")?;
     let session = p.get("id").or_else(|| p.get("session_id"))?.as_str()?.to_owned();
     let cwd = p.get("cwd").and_then(Value::as_str).unwrap_or_default().to_owned();
@@ -202,7 +212,7 @@ mod tests {
         let file = |name: &str, payload: Value| {
             let path = dir.join(name);
             std::fs::write(&path, format!("{}\n", json!({ "type": "session_meta", "payload": payload }))).unwrap();
-            read_meta(&path).unwrap().2
+            read_meta(&path).unwrap().unwrap().2
         };
         let t3 = file("a.jsonl", json!({ "id": "a", "cwd": "/x", "originator": "T3 Code", "source": "vscode" }));
         assert_eq!(t3, json!({ "t3": true, "subagent": false }));
@@ -210,6 +220,12 @@ mod tests {
         assert_eq!(older, json!({ "t3": true, "subagent": true }));
         let cli = file("c.jsonl", json!({ "id": "c", "originator": "codex-tui", "source": "cli" }));
         assert_eq!(cli, json!({ "t3": false, "subagent": false }));
+        // The first line isn't all there yet: read it again next time.
+        let half = dir.join("d.jsonl");
+        std::fs::write(&half, r#"{"type":"session_meta","payload":{"id":"d","originator":"T3"#).unwrap();
+        assert_eq!(read_meta(&half), None);
+        std::fs::write(&half, "not json\n").unwrap();
+        assert_eq!(read_meta(&half), Some(None));
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

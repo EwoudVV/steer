@@ -103,12 +103,16 @@ pub fn parse_session(path: &Path, mut t3: Option<&mut crate::t3::Db>) -> Option<
         for (i, t, text) in &sdk_turns {
             let key = prompt_key(crate::t3::typed_part(text).0);
             let typed = match (t3.as_deref_mut(), session) {
-                (Some(db), Some(s)) => db.typed(s, None, *t, &key) == crate::t3::Says::Typed(true),
+                (Some(db), Some(s)) => {
+                    let yes = db.typed(s, None, *t, &key) == crate::t3::Says::Typed(true);
+                    if yes {
+                        count_what_they_wrote(&mut events[*i], db);
+                    }
+                    yes
+                }
                 _ => false,
             };
-            if typed {
-                count_typed_part(&mut events[*i], text);
-            } else {
+            if !typed {
                 unverified.insert(*i);
             }
         }
@@ -175,15 +179,15 @@ fn typed_in_t3(v: &Value, t: DateTime<Utc>, db: Option<&mut crate::t3::Db>) -> O
         return None;
     }
     let mut e = user_event_as(v, t, true)?;
-    count_typed_part(&mut e, &text);
+    count_what_they_wrote(&mut e, db);
     Some(e)
 }
 
-/// Only the part of a T3 prompt the person wrote counts (see `t3::typed_part`).
-fn count_typed_part(e: &mut Event, text: &str) {
-    if let EventKind::Prompt(p) = &mut e.kind {
-        let (typed, images) = crate::t3::typed_part(text);
-        *p = PromptInfo::analyze(typed, images.max(p.images));
+/// What counts of a T3 prompt is the person's message as T3 saved it, not everything T3
+/// sent with it (see `t3::typed_part`).
+fn count_what_they_wrote(e: &mut Event, db: &crate::t3::Db) {
+    if let (EventKind::Prompt(p), Some((text, images))) = (&mut e.kind, db.wrote()) {
+        *p = PromptInfo::analyze(text, images);
     }
 }
 
@@ -405,11 +409,13 @@ mod tests {
         let db = tmp.join("statev2.sqlite");
         fake(
             &db,
-            &[("th1", "s1")],
+            &[("th1", "s1"), ("th5", "s5")],
             &[
                 ("m0", "th1", at(-101), by("user", "web", "start the router dashboard")),
                 ("m1", "th1", at(-1), by("user", "web", "add a pause menu")),
                 ("m2", "th1", at(19), by("agent", "mcp", "review the pause menu")),
+                ("m5", "th5", at(-1), by("user", "web", "make the dashboard dark")),
+                ("m6", "th5", at(9), by("agent", "server", "The delegated task finished")),
             ],
         );
         // Before November 2026 T3's lines weren't marked "t3-code" yet.
@@ -434,9 +440,20 @@ mod tests {
         let listed = json!({ "type": "attachment", "attachment": { "type": "deferred_tools_delta", "addedNames": ["Read", "mcp__t3-code__delegate_task"] } });
         fs::write(&tools, format!("{older}\n{listed}\n")).unwrap();
         assert_eq!(prompts(tools.as_path(), None), 0);
+        // An older session with nothing in the log saying T3 ran it, but T3 knows it.
+        let known = tmp.join("s5.jsonl");
+        older["sessionId"] = "s5".into();
+        older["timestamp"] = at(0).to_rfc3339_opts(chrono::SecondsFormat::Millis, true).into();
+        older["message"]["content"] = "make the dashboard dark".into();
+        let mut wake = older.clone();
+        wake["timestamp"] = at(10).to_rfc3339_opts(chrono::SecondsFormat::Millis, true).into();
+        wake["message"]["content"] = "The delegated task finished".into();
+        fs::write(&known, format!("{older}\n{wake}\n")).unwrap();
+        assert_eq!(prompts(known.as_path(), None), 2, "nothing says it's T3's");
         let mut t3 = crate::t3::Db::open(&db).unwrap();
         assert_eq!(prompts(log.as_path(), Some(&mut t3)), 2, "only the ones the person typed");
         assert_eq!(prompts(other.as_path(), Some(&mut t3)), 1);
+        assert_eq!(prompts(known.as_path(), Some(&mut t3)), 1, "T3's database knows the session");
         drop(t3);
         let _ = fs::remove_dir_all(&tmp);
     }

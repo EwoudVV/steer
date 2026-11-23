@@ -438,6 +438,9 @@ fn send_all(config: &Config) -> Result<usize, String> {
 
 enum Verdict {
     Send,
+    /// Send it, counting this text and these images as what the person wrote: T3's copy
+    /// of their message (see `recount`).
+    SendAs(String, usize),
     Drop,
     Wait,
 }
@@ -475,8 +478,8 @@ fn verdict(e: &Value, now: DateTime<Utc>, logs: &mut HashMap<String, Vec<LogProm
     }
     // When T3's database can't be read it's tried again on the next flush, for a few
     // minutes: the server doesn't take events more than 5 minutes old.
-    let t3_decides = |says: Says| match says {
-        Says::Typed(true) => Verdict::Send,
+    let t3_decides = |(says, wrote): (Says, Option<(String, usize)>)| match says {
+        Says::Typed(true) => wrote.map_or(Verdict::Send, |(text, images)| Verdict::SendAs(text, images)),
         Says::Unreadable if (now - t).num_seconds() < 240 => Verdict::Wait,
         _ => Verdict::Drop,
     };
@@ -484,9 +487,8 @@ fn verdict(e: &Value, now: DateTime<Utc>, logs: &mut HashMap<String, Vec<LogProm
         // Codex. A session T3 didn't start is sent like before.
         let from_t3 = check["t3"]["codex"] == "t3";
         return match t3_typed(e, t, key, t3) {
-            Says::Typed(typed) => if typed { Verdict::Send } else { Verdict::Drop },
-            _ if !from_t3 => Verdict::Send,
-            says => t3_decides(says),
+            (Says::NotT3s | Says::Unreadable, _) if !from_t3 => Verdict::Send,
+            answer => t3_decides(answer),
         };
     };
     let lines = logs.entry(path.to_owned()).or_insert_with(|| log_prompts(Path::new(path)));
@@ -513,15 +515,33 @@ fn verdict(e: &Value, now: DateTime<Utc>, logs: &mut HashMap<String, Vec<LogProm
     }
 }
 
-/// Asks T3 Code's database whether the person wrote a prompt. It's found by the
-/// fingerprint of the part they wrote, if the hook made one.
-fn t3_typed(e: &Value, t: DateTime<Utc>, key: &str, dbs: &mut T3Dbs) -> Says {
+/// Asks T3 Code's database whether the person wrote a prompt, and if so what they
+/// wrote. It's found by the fingerprint of the part they wrote, if the hook made one.
+fn t3_typed(e: &Value, t: DateTime<Utc>, key: &str, dbs: &mut T3Dbs) -> (Says, Option<(String, usize)>) {
     let check = &e["check"]["t3"];
     let key = check["key"].as_str().unwrap_or(key);
-    let (Some(path), Some(session)) = (check["db"].as_str(), e["session"].as_str()) else { return Says::Unreadable };
+    let (Some(path), Some(session)) = (check["db"].as_str(), e["session"].as_str()) else { return (Says::Unreadable, None) };
     match dbs.entry(path.to_owned()).or_insert_with(|| crate::t3::Db::open(Path::new(path))) {
-        Some(db) => db.typed(session, check["thread"].as_str(), t, key),
-        None => Says::Unreadable,
+        Some(db) => {
+            let says = db.typed(session, check["thread"].as_str(), t, key);
+            (says, db.wrote().map(|(text, images)| (text.to_owned(), images)))
+        }
+        None => (Says::Unreadable, None),
+    }
+}
+
+/// Counts what the person wrote, as T3 saved it, instead of the prompt T3 sent, which can
+/// have a lot more around it (see `t3::typed_part`).
+fn recount(e: &mut Value, text: &str, images: usize) {
+    let p = PromptInfo::analyze(text, images);
+    e["words"] = p.words.into();
+    e["chars"] = p.chars.into();
+    e["images"] = p.images.into();
+    e["specific"] = p.specific.into();
+    e["observation"] = p.observation.into();
+    e["generic"] = p.generic.into();
+    if e["check"]["words"].is_array() {
+        e["check"]["words"] = words(&p);
     }
 }
 
@@ -582,8 +602,12 @@ fn send_files(config: &Config, waiting: &mut Vec<Value>) -> Result<usize, String
             let mut ready = Vec::new();
             let mut held = Vec::new();
             for mut e in events {
-                match verdict(&e, now, &mut logs, &mut t3) {
-                    Verdict::Send => {
+                let v = verdict(&e, now, &mut logs, &mut t3);
+                if let Verdict::SendAs(text, images) = &v {
+                    recount(&mut e, text, *images);
+                }
+                match v {
+                    Verdict::Send | Verdict::SendAs(..) => {
                         if let (Some(session), words @ Value::Array(_)) = (e["session"].as_str(), &e["check"]["words"]) {
                             remember_words(session, words);
                         }
@@ -1296,7 +1320,8 @@ mod tests {
         let later = at(90);
         let (mut logs, mut dbs) = (HashMap::new(), HashMap::new());
         let mut verdict_of = |e: Value| verdict(&e, later, &mut logs, &mut dbs);
-        assert!(matches!(verdict_of(hooked("s1", "add a pause menu", 0, &in_t3)), Verdict::Send));
+        // What counts is the person's message as T3 saved it.
+        assert!(matches!(verdict_of(hooked("s1", "add a pause menu", 0, &in_t3)), Verdict::SendAs(text, 0) if text == "add a pause menu"));
         assert!(matches!(verdict_of(hooked("s1", "The tests pass now, merge it", 10, &in_t3)), Verdict::Drop));
         // What the log says isn't from T3 at all still doesn't count.
         assert!(matches!(verdict_of(hooked("s1", "Background command finished", 20, &in_t3)), Verdict::Drop));
@@ -1319,7 +1344,7 @@ mod tests {
             }
             e
         };
-        assert!(matches!(verdict_of(codex("s1", "add a pause menu", 0, true)), Verdict::Send));
+        assert!(matches!(verdict_of(codex("s1", "add a pause menu", 0, true)), Verdict::SendAs(..)));
         assert!(matches!(verdict_of(codex("s1", "The tests pass now, merge it", 10, false)), Verdict::Drop));
         assert!(matches!(verdict_of(codex("not-t3", "add a pause menu", 0, false)), Verdict::Send));
         assert!(matches!(verdict_of(codex("unknown-to-t3", "add a pause menu", 0, true)), Verdict::Drop));

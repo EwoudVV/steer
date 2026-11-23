@@ -257,6 +257,11 @@ assert.deepEqual(checks(reportOf([session("normal", honest())])), []);
   tools.line(line("q0", { entrypoint: "sdk-ts" }));
   tools.line(JSON.stringify({ type: "attachment", attachment: { type: "deferred_tools_delta", addedNames: ["Read", "mcp__t3-code__delegate_task"] } }));
   assert.equal(tools.finish(), null);
+  // Tool results and rejections are the agent's turn, not something T3 sent, so they stay.
+  const turns = new SessionReader("p/t3-tools.jsonl");
+  turns.line(line("r0", { entrypoint: "t3-code" }));
+  turns.line(JSON.stringify({ type: "user", uuid: "r1", timestamp: "2026-11-22T20:00:05.000Z", entrypoint: "sdk-ts", turnOrigin: "sdk", toolDenialKind: "user-rejected", message: { role: "user", content: [{ type: "tool_result", content: "no" }] } }));
+  assert.deepEqual(turns.finish().events.map((e) => e.kind), ["rejected"]);
 }
 
 console.log("counting tests passed");

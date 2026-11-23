@@ -233,7 +233,10 @@ fn user_event_as(v: &Value, t: DateTime<Utc>, sdk_typed: bool) -> Option<Event> 
     if v.get("promptSource").and_then(Value::as_str) == Some("system") {
         return None;
     }
-    if !sdk_typed && sent_by_sdk(v) {
+    // `claude -p` marks its turns "sdk" too, but that's how scripts and agents run Claude
+    // Code (T3 names threads with it), so it isn't someone typing in an app.
+    let print_mode = v.get("entrypoint").and_then(Value::as_str) == Some("sdk-cli");
+    if (!sdk_typed || print_mode) && sent_by_sdk(v) {
         return None;
     }
 
@@ -387,6 +390,12 @@ mod tests {
         for not_typed in ["task-notification", "task_notification", "peer", "coordinator", "scheduled", "host_synthetic"] {
             assert!(!prompt_line(&line(not_typed)).unwrap().2, "{not_typed} isn't a person typing");
         }
+        // `claude -p` is how scripts and agents run Claude Code.
+        let mut print = line("sdk");
+        print["entrypoint"] = "sdk-cli".into();
+        assert!(!prompt_line(&print).unwrap().2);
+        print["entrypoint"] = "sdk-py".into();
+        assert!(prompt_line(&print).unwrap().2);
     }
 
     #[test]

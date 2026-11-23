@@ -214,8 +214,9 @@ function userEvent(v, t) {
   if (v.promptSource === "system") return null;
   // T3 Code sends what agents write to each other through the SDK too, and only its own
   // database can tell that apart from what the person typed. The browser can't read it
-  // (steer report does), so T3's "sdk" turns don't count here.
-  if (v.entrypoint === "t3-code" && sentBySdk(v)) return null;
+  // (steer report does), so T3's "sdk" turns don't count here. `claude -p` marks its
+  // turns "sdk" too, but that's how scripts and agents run Claude Code.
+  if ((v.entrypoint === "t3-code" || v.entrypoint === "sdk-cli") && sentBySdk(v)) return null;
 
   const [raw, images] = extractText(content);
   const text = stripTag(raw, "system-reminder").trim();

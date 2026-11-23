@@ -249,6 +249,8 @@ assert.deepEqual(checks(reportOf([session("normal", honest())])), []);
     return (reader.finish()?.events ?? []).filter((e) => e.kind === "prompt").length;
   };
   assert.equal(prompts("sdk-ts", "sdk-ts"), 2, "other apps on the sdk count like before");
+  // `claude -p` is how scripts and agents run Claude Code (T3 names its threads with it).
+  assert.equal(prompts("sdk-cli"), 0);
   assert.equal(prompts("t3-code"), 0);
   // Before November 2026 T3's lines said "sdk-ts". One "t3-code" line makes it T3's,
   // and so does T3's own tools showing up in the log.

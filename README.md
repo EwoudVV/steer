@@ -58,7 +58,7 @@ project is the name of the git repo or folder you were in (your home folder show
 
 ## how time is counted
 
-the bottom of every report explains it, and the code is in `src/analyze.rs` (and `web/steer.js` for the website and server, which gives the same numbers). short version: the gap between the agent finishing and your next prompt counts, with caps, and loops of "continue" / "fix it" without testing dont count.
+the bottom of every report explains it, and the code is in `src/analyze.rs` (and `web/steer.js` for the website and server, which gives the same numbers). short version: the gap between the agent finishing and your next prompt counts, with caps, and loops of "continue" / "fix it" without testing dont count. prompts sent with `claude -p` dont count either, since that's how scripts and agents run claude code.
 
 ## other commands
 

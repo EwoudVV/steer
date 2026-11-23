@@ -254,16 +254,26 @@ pub(crate) fn new_id() -> String {
     format!("{:x}-{:x}", nanos, std::process::id())
 }
 
+/// Normalize a project name: lowercase, treat spaces and dashes as equivalent,
+/// and collapse multiple spaces/dashes into single spaces.
+/// "Vault Books", "vault-books", "VAULT_BOOKS" → "vault books"
+fn normalize(name: &str) -> String {
+    let mut t = name.to_lowercase();
+    t = t.replace('-', " ");
+    let parts: Vec<&str> = t.split_whitespace().collect();
+    parts.join(" ")
+}
+
 /// Folder name of the git repo the session is in, or of the folder itself. The home
 /// folder is called "home", since its name is usually the person's real name and the
 /// profile is public.
 pub(crate) fn project_name(cwd: &str) -> String {
     let start = Path::new(cwd);
     if cwd.is_empty() {
-        return "unknown".into();
+        return normalize("unknown");
     }
     if start == home() {
-        return "home".into();
+        return normalize("home");
     }
     let home = home();
     let mut d = Some(start);
@@ -275,14 +285,19 @@ pub(crate) fn project_name(cwd: &str) -> String {
         }
         if p.join(".git").exists() {
             let name = p.file_name().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
+            let key = normalize(&name);
             let mut roots = ROOTS.lock().unwrap_or_else(|e| e.into_inner());
-            roots.retain(|(n, _)| n != &name);
-            roots.push((name.clone(), p.to_path_buf()));
-            return name;
+            roots.retain(|(n, _)| normalize(n) != key);
+            roots.push((key.clone(), p.to_path_buf()));
+            return key;
         }
         d = p.parent();
     }
-    start.file_name().map(|s| s.to_string_lossy().into_owned()).unwrap_or_else(|| "unknown".into())
+    let raw = start
+        .file_name()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "unknown".into());
+    normalize(&raw)
 }
 
 /// Git repos `project_name` found in this run, by project name, so `evidence::note` can
@@ -832,7 +847,7 @@ fn submit(args: &[String]) -> Result<String, String> {
                 it.next();
             }
             a if a.starts_with("--") => return Err(format!("unknown option {a}")),
-            a => named = Some(a.to_owned()),
+            a => named = Some(normalize(a)),
         }
     }
     let here = project_name(&cwd);

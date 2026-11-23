@@ -201,6 +201,16 @@ function note(store, e) {
 
 const NAME = /^[a-z0-9][a-z0-9_-]{1,31}$/;
 const clean = (s, max) => (typeof s === "string" ? s.replace(/[\u0000-\u001f]/g, "").slice(0, max) : "");
+
+// Normalize a string: lowercase, treat spaces and dashes as equivalent,
+// and collapse multiple spaces/dashes into single spaces.
+const normalize = (s) => {
+  if (typeof s !== "string") return s;
+  let t = s.toLowerCase();
+  t = t.replace(/-/g, " ");
+  t = t.replace(/\s+/g, " ").trim();
+  return t;
+};
 const KINDS = new Set(["prompt", "tool", "stop", "interrupt", "checkin", "run", "save", "commit"]);
 // Evidence from the project, sent by steer's watcher and terminal lines: a command you ran
 // (its first word and exit code), that files were saved, a commit's hash.
@@ -241,7 +251,7 @@ function accept(raw, now) {
   const e = {
     id,
     session,
-    project: clean(raw.project, 100) || "unknown",
+    project: normalize(clean(raw.project, 100)) || "unknown",
     via,
     kind,
     t: new Date(t).toISOString(),
@@ -510,11 +520,11 @@ function workerMain() {
       return answers.length ? checkinMoments(projects, await sessionsOf(name), answers) : [];
     }
     if (op === "commits") {
-      const whole = projects.find((x) => x.name === project);
+      const whole = projects.find((x) => x.name === normalize(project));
       return whole ? reviewFacts(projectBetween(whole, from, to)).commits : [];
     }
     if (op === "review") {
-      const whole = projects.find((x) => x.name === project);
+      const whole = projects.find((x) => x.name === normalize(project));
       if (!whole) return null;
       const p = projectBetween(whole, from, to);
       if (!p.sessions.length) return { empty: true };
@@ -555,7 +565,7 @@ function workerMain() {
         })),
       };
     }
-    const p = projects.find((x) => x.name === project);
+    const p = projects.find((x) => x.name === normalize(project));
     return p ? projectHtml(p) : null;
   }
 }
@@ -822,9 +832,9 @@ async function profilePage(res, name) {
 async function projectPage(res, name, project) {
   const store = await storeOf(name);
   const report = await reportOf(name, store);
-  const html = report.hours.some((p) => p.name === project) ? await projectOf(name, store, project) : null;
+  const html = report.hours.some((p) => p.name === normalize(project)) ? await projectOf(name, store, project) : null;
   if (html == null) return send(res, 404, "No such project");
-  const tools = [...(store.vias.get(project) ?? [])];
+  const tools = [...(store.vias.get(normalize(project)) ?? [])];
   const u = encodeURIComponent(name);
   const pr = encodeURIComponent(project);
   const badgeLine = `[![steered with ai](${PUBLIC_URL}/badge/${u}/${pr}.svg)](${PUBLIC_URL}/u/${u}/${pr})`;
@@ -861,7 +871,7 @@ async function badge(res, name, project) {
   try {
     if (name !== null && project !== null && hasUser(name)) {
       const hours = (await reportOf(name, await storeOf(name))).hours;
-      const secs = project === undefined ? hours.reduce((n, p) => n + p.your_secs, 0) : hours.find((p) => p.name === project)?.your_secs;
+      const secs = project === undefined ? hours.reduce((n, p) => n + p.your_secs, 0) : hours.find((p) => p.name === normalize(project))?.your_secs;
       if (secs != null) value = fmtDur(secs);
     }
   } catch {
@@ -875,7 +885,7 @@ async function badge(res, name, project) {
 
 async function hoursJson(res, name, project) {
   const store = await storeOf(name);
-  const projects = (await reportOf(name, store)).hours.filter((p) => !project || p.name === project);
+  const projects = (await reportOf(name, store)).hours.filter((p) => !normalize(project) || p.name === normalize(project));
   if (project && !projects.length) return json(res, 404, { error: "no such project" });
   const hc = users[name].hc;
   json(res, 200, {
@@ -1190,7 +1200,7 @@ async function eventsJsonl(req, res, name, { project = null, lo = -Infinity, hi 
           } catch {
             continue;
           }
-          if (project !== null && e.project !== project) continue;
+          if (project !== null && e.project !== normalize(project)) continue;
           const t = Date.parse(e.t);
           if (t < lo || t >= hi) continue;
           out += line + "\n";
@@ -1599,15 +1609,17 @@ async function handle(req, res) {
 
   if (req.method === "GET" && (m = /^\/u\/([^/]+)(?:\/([^/]+))?\/?$/.exec(path))) {
     const name = decode(m[1]);
-    const project = m[2] === undefined ? undefined : decode(m[2]);
-    if (name === null || project === null) return send(res, 400, "Bad path");
+    const raw = m[2] === undefined ? undefined : decode(m[2]);
+    const project = raw === undefined ? raw : normalize(raw);
+    if (name === null || raw === null) return send(res, 400, "Bad path");
     if (!hasUser(name)) return send(res, 404, "No such user");
     return project === undefined ? profilePage(res, name) : projectPage(res, name, project);
   }
   if (req.method === "GET" && (m = /^\/api\/u\/([^/]+)(?:\/([^/]+))?\/?$/.exec(path))) {
     const name = decode(m[1]);
-    const project = m[2] === undefined ? null : decode(m[2]);
-    if (name === null || (project === null && m[2] !== undefined)) return json(res, 400, { error: "bad path" });
+    const raw = m[2] === undefined ? null : decode(m[2]);
+    const project = raw === null ? null : normalize(raw);
+    if (name === null || (raw === null && m[2] !== undefined)) return json(res, 400, { error: "bad path" });
     if (!hasUser(name)) return json(res, 404, { error: "no such user" });
     return hoursJson(res, name, project);
   }

@@ -547,7 +547,11 @@ function comparePaths(a, b) {
 function projectName(cwd) {
   if (!cwd) return "unknown";
   const parts = cwd.split(/[\\/]/).filter(Boolean);
-  return parts.length ? parts[parts.length - 1] : cwd;
+  let name = parts.length ? parts[parts.length - 1] : cwd;
+  // Normalize: lowercase, replace dashes with spaces, collapse whitespace
+  name = name.toLowerCase().replace(/-/g, ' ');  // dashes to spaces
+  name = name.replace(/\s+/g, ' ');  // collapse multiple spaces
+  return name.trim();
 }
 
 // Evidence counts as part of the AI session it happened during or right after: within

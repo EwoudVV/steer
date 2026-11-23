@@ -44,6 +44,48 @@ pub(crate) fn db_path() -> Option<PathBuf> {
     ["userdata", "dev"].iter().map(|d| base.join(d).join("statev2.sqlite")).find(|p| p.exists())
 }
 
+/// What T3 sends when the person attached files without writing anything.
+const ONLY_FILES: &str =
+    "[User attached one or more files without additional text. Respond using the conversation context and the attached files.]";
+
+/// The part of a prompt from T3 that the person wrote, and how many images they
+/// attached. On the way to the agent T3 can add things in front: what happened in the
+/// thread so far when it moves to a new session ("Context handoff (...)", ending in
+/// "User message:"), or "Ultrathink:" when that's on. After it there's a line for each
+/// attached file saying where it's saved, and context the person pointed at in the app
+/// (`<t3_context>`, `<assistant_citations>`). None of that is typing.
+pub(crate) fn typed_part(prompt: &str) -> (&str, usize) {
+    const MESSAGE: &str = "\n\nUser message:\n";
+    let mut s = match prompt.rfind(MESSAGE) {
+        Some(i) => &prompt[i + MESSAGE.len()..],
+        None => prompt,
+    };
+    let mut images = 0;
+    loop {
+        let t = s.trim_end();
+        let cut = if t.ends_with("</t3_context>") {
+            t.rfind("<t3_context")
+        } else if t.ends_with("</assistant_citations>") {
+            t.rfind("<assistant_citations>")
+        } else if t.ends_with("End untrusted captured-window data.") {
+            t.rfind("Untrusted captured-window data follows as JSON")
+        } else {
+            t.rfind("\n\n[Attached ").filter(|&i| t.ends_with(']') && !t[i + 2..].contains("\n\n"))
+        };
+        let Some(i) = cut else {
+            s = t;
+            break;
+        };
+        if t[i..].starts_with("\n\n[Attached image") {
+            images += 1;
+        }
+        s = &t[..i];
+    }
+    let s = s.trim();
+    let s = s.strip_prefix("Ultrathink:").map_or(s, str::trim_start);
+    (if s == ONLY_FILES { "" } else { s }, images)
+}
+
 /// What the Claude Code hook adds to a prompt's check when T3 started this Claude Code.
 /// T3 puts its thread's id in the environment of every Claude Code it runs. It's read
 /// here because the flush that looks the prompt up can run in a process T3 didn't start.
@@ -118,8 +160,9 @@ impl Db {
         matches!(self.thread_of(session), Ok(Some(_)))
     }
 
-    /// Whether the person wrote the prompt T3 sent to `session` at `t`, found by its
-    /// fingerprint (`claude::prompt_key`). `thread` is the thread the hook was told, if
+    /// Whether the person wrote the prompt T3 sent to `session` at `t`, found by the
+    /// fingerprint (`claude::prompt_key`) of the part they wrote (`typed_part`). `thread`
+    /// is the thread the hook was told, if
     /// any. A Claude Code that an agent runs inside a T3 thread gets T3's environment
     /// too, but T3 didn't start its session, so that's `NotT3s`.
     pub(crate) fn typed(&mut self, session: &str, thread: Option<&str>, t: DateTime<Utc>, key: &str) -> Says {
@@ -155,8 +198,9 @@ impl Db {
     }
 }
 
+/// The part of a message the person wrote (T3 saves "Ultrathink:" with it).
 fn text(m: &Message) -> &str {
-    m.payload.get("text").and_then(Value::as_str).unwrap_or_default()
+    typed_part(m.payload.get("text").and_then(Value::as_str).unwrap_or_default()).0
 }
 
 /// Finds the message a prompt came from in `messages` (newest first) and says whether
@@ -227,6 +271,20 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn what_t3_adds_to_a_prompt_isnt_typing() {
+        assert_eq!(typed_part("add a pause menu"), ("add a pause menu", 0));
+        let handoff = "Context handoff (delta_since_last_turn):\nthe agent added a menu, tests pass\n\nUser message:\nship it";
+        assert_eq!(typed_part(handoff), ("ship it", 0));
+        let files = "look at these\n\n[Attached image \"a.png\" is saved at: /t/a.png]\n\n[Attached file \"b.log\" is saved at: /t/b.log]";
+        assert_eq!(typed_part(files), ("look at these", 1));
+        assert_eq!(typed_part("Ultrathink:\nwhy is it slow"), ("why is it slow", 0));
+        let context = "fix [File: main.rs; ref=f1]\n\n<t3_context version=\"1\">\n<context kind=\"file\" id=\"f1\">fn main() {}</context>\n</t3_context>";
+        assert_eq!(typed_part(context), ("fix [File: main.rs; ref=f1]", 0));
+        let only = format!("{ONLY_FILES}\n\n[Attached image \"a.png\" is saved at: /t/a.png]");
+        assert_eq!(typed_part(&only), ("", 1));
+    }
+
+    #[test]
     fn only_messages_the_person_wrote_count() {
         let path = std::env::temp_dir().join(format!("steer-t3-{}.sqlite", crate::live::new_id()));
         let mut scheduled = by("user", "web", "check the inbox");
@@ -248,15 +306,17 @@ pub(crate) mod tests {
             ],
         );
         let mut db = Db::open(&path).unwrap();
-        let mut typed = |s: i64, text: &str| db.typed("s1", Some("th1"), at(s), &crate::claude::prompt_key(text));
+        let mut typed = |s: i64, text: &str| db.typed("s1", Some("th1"), at(s), &crate::claude::prompt_key(typed_part(text).0));
         let (person, agent) = (Says::Typed(true), Says::Typed(false));
 
         assert_eq!(typed(1, "make the snake move faster"), person);
         assert_eq!(typed(21, "Act as the reviewer sub-agent for this task.\n\nreview the diff"), agent);
         assert_eq!(typed(41, "check the inbox"), agent, "a scheduled task");
-        // T3 added where the screenshot is saved, so the text doesn't match. It's the
-        // newest message, and the person sent it from their phone.
+        // T3 added where the screenshot is saved. The person sent it from their phone.
         assert_eq!(typed(61, "look at this screenshot\n\n[Attached image \"shot.png\" is saved at: /tmp/shot.png]"), person);
+        // A skill: T3 changes "$review" to "/review", so the text doesn't match. It's the
+        // newest message, so it's the one just sent.
+        assert_eq!(typed(62, "look at this screenshot\n/review"), person);
         assert_eq!(typed(81, "Which database?\nsqlite"), agent, "an answer T3 passed on");
         // The same text twice: the newest one is the one just sent.
         assert_eq!(typed(101, "continue"), person);

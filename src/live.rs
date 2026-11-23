@@ -173,9 +173,11 @@ fn record() -> Option<()> {
             if crate::claude::injected(text) {
                 return None;
             }
-            // Prompts from T3 Code also get looked up in its database (see t3.rs).
+            // Prompts from T3 Code also get looked up in its database (see t3.rs). What
+            // T3 adds to a prompt on the way isn't typing, so only the rest counts.
             let t3 = crate::t3::hook_check(&v);
-            let info = PromptInfo::analyze(text, 0);
+            let (typed, images) = if t3.is_some() { crate::t3::typed_part(text) } else { (text, 0) };
+            let info = PromptInfo::analyze(typed, images);
             let mut e = prompt_event_as(new_id(), session, &project, "claude-code", Utc::now(), &info, t3.is_none());
             if let Some(log) = v.get("transcript_path").and_then(Value::as_str) {
                 e["check"] = json!({ "log": log, "key": crate::claude::prompt_key(text) });
@@ -183,6 +185,7 @@ fn record() -> Option<()> {
             if let Some(t3) = t3 {
                 e["check"]["key"] = crate::claude::prompt_key(text).into();
                 e["check"]["t3"] = t3;
+                e["check"]["t3"]["key"] = crate::claude::prompt_key(typed).into();
                 e["check"]["words"] = words(&info);
             }
             e
@@ -510,9 +513,11 @@ fn verdict(e: &Value, now: DateTime<Utc>, logs: &mut HashMap<String, Vec<LogProm
     }
 }
 
-/// Asks T3 Code's database whether the person wrote a prompt.
+/// Asks T3 Code's database whether the person wrote a prompt. It's found by the
+/// fingerprint of the part they wrote, if the hook made one.
 fn t3_typed(e: &Value, t: DateTime<Utc>, key: &str, dbs: &mut T3Dbs) -> Says {
     let check = &e["check"]["t3"];
+    let key = check["key"].as_str().unwrap_or(key);
     let (Some(path), Some(session)) = (check["db"].as_str(), e["session"].as_str()) else { return Says::Unreadable };
     match dbs.entry(path.to_owned()).or_insert_with(|| crate::t3::Db::open(Path::new(path))) {
         Some(db) => db.typed(session, check["thread"].as_str(), t, key),

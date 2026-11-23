@@ -44,7 +44,7 @@ pub fn parse_session(path: &Path, mut t3: Option<&mut crate::t3::Db>) -> Option<
     // T3 only started marking its lines "t3-code" in November 2026, so one marked line
     // makes the whole session T3's, and so do T3's own tools (mcp__t3-code__...), which
     // every agent T3 runs gets and the log lists. Until the end, turns that came in
-    // through the SDK are kept aside as (index in events, time, fingerprint).
+    // through the SDK are kept aside as (index in events, time, text).
     let mut ran_by_t3 = false;
     let mut sdk_turns = Vec::new();
 
@@ -86,7 +86,7 @@ pub fn parse_session(path: &Path, mut t3: Option<&mut crate::t3::Db>) -> Option<
         if let Some(mut e) = event {
             if ty == "user" && !from_t3(&v) && sent_by_sdk(&v) {
                 if let Some((_, text, _)) = prompt_line(&v) {
-                    sdk_turns.push((events.len(), t, prompt_key(&text)));
+                    sdk_turns.push((events.len(), t, text));
                 }
             }
             e.id = v.get("uuid").and_then(Value::as_str).map(hash_id);
@@ -100,12 +100,15 @@ pub fn parse_session(path: &Path, mut t3: Option<&mut crate::t3::Db>) -> Option<
     let known = |db: &mut crate::t3::Db| session.is_some_and(|s| db.knows(s));
     if !sdk_turns.is_empty() && (ran_by_t3 || t3.as_deref_mut().is_some_and(known)) {
         let mut unverified = std::collections::HashSet::new();
-        for (i, t, key) in &sdk_turns {
+        for (i, t, text) in &sdk_turns {
+            let key = prompt_key(crate::t3::typed_part(text).0);
             let typed = match (t3.as_deref_mut(), session) {
-                (Some(db), Some(s)) => db.typed(s, None, *t, key) == crate::t3::Says::Typed(true),
+                (Some(db), Some(s)) => db.typed(s, None, *t, &key) == crate::t3::Says::Typed(true),
                 _ => false,
             };
-            if !typed {
+            if typed {
+                count_typed_part(&mut events[*i], text);
+            } else {
                 unverified.insert(*i);
             }
         }
@@ -168,7 +171,20 @@ fn typed_in_t3(v: &Value, t: DateTime<Utc>, db: Option<&mut crate::t3::Db>) -> O
     }
     let session = v.get("sessionId").and_then(Value::as_str)?;
     let (_, text, _) = prompt_line(v)?;
-    (db.typed(session, None, t, &prompt_key(&text)) == crate::t3::Says::Typed(true)).then(|| user_event_as(v, t, true)).flatten()
+    if db.typed(session, None, t, &prompt_key(crate::t3::typed_part(&text).0)) != crate::t3::Says::Typed(true) {
+        return None;
+    }
+    let mut e = user_event_as(v, t, true)?;
+    count_typed_part(&mut e, &text);
+    Some(e)
+}
+
+/// Only the part of a T3 prompt the person wrote counts (see `t3::typed_part`).
+fn count_typed_part(e: &mut Event, text: &str) {
+    if let EventKind::Prompt(p) = &mut e.kind {
+        let (typed, images) = crate::t3::typed_part(text);
+        *p = PromptInfo::analyze(typed, images.max(p.images));
+    }
 }
 
 /// `sdk_typed`: whether a turn that came in through the Agent SDK is the person typing.

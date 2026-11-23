@@ -76,12 +76,14 @@ pub fn parse(v: &Value, session: &str, project: &str, line_offset: u64, tags: &V
             // asks its database who wrote this one (see t3.rs). Sessions T3 started are
             // only sent if it says the person did, so they don't count as typed yet.
             let from_t3 = tags["t3"] == true;
-            let info = PromptInfo::analyze(text.trim(), images);
+            let (typed, attached) = if from_t3 { crate::t3::typed_part(text.trim()) } else { (text.trim(), 0) };
+            let info = PromptInfo::analyze(typed, images.max(attached));
             let mut e = prompt_event_as(id, session, project, VIA, t, &info, !from_t3);
             let db = crate::t3::db_path();
             if from_t3 || db.is_some() {
                 let db = db.map(|d| d.to_string_lossy().into_owned());
-                e["check"] = json!({ "key": crate::claude::prompt_key(&text), "t3": { "db": db } });
+                let key = crate::claude::prompt_key(crate::t3::typed_part(&text).0);
+                e["check"] = json!({ "key": key, "t3": { "db": db } });
                 if from_t3 {
                     e["check"]["t3"]["codex"] = "t3".into();
                     e["check"]["words"] = words(&info);

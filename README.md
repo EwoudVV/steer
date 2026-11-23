@@ -4,7 +4,7 @@
 
 steer tracks the time you spend working with ai coding agents. the time the agent runs by itself doesnt count, only what you do around it, like writing prompts, reading what it did, testing and fixing stuff. made for hack club's ai time tracking bounty.
 
-works with claude code, codex, opencode, copilot (vs code and cli), cursor and freebuff.
+works with claude code, codex, opencode, copilot (vs code and cli), cursor and freebuff, also when t3 code runs claude code or codex for you.
 
 ## install
 
@@ -33,6 +33,7 @@ steer uninstall
 ## how it works
 
 - claude code and cursor run `steer hook` on every prompt, tool call and when the agent finishes
+- t3 code runs claude code and codex for you, and it also sends them what your agents write to each other: a task one agent hands another, a message from another thread, a scheduled task. their logs show all of that as you typing. so for prompts from t3 code, steer looks in t3's own database on your computer (`~/.t3/userdata/statev2.sqlite`, opened read-only) and only counts the ones you wrote, as t3 saved them. the drop-a-folder report on the website can't read that database, so prompts from t3 don't count there
 - codex, opencode, copilot and freebuff dont have hooks like that, so a small background watcher (`steer watch`) reads their session logs every 5 seconds. it uses about 0.2% cpu
 - the watcher also looks at the git repos you used an ai tool in during the last hour, every 30 seconds, to see when you change code or commit yourself. that counts the time you spend coding and testing by hand between prompts, within 30 minutes of using an ai tool. a change only counts if the agent wasn't editing right then, and saving a file without changing it or undoing back to how it was doesnt count. it only lists files with git and compares them itself, so nothing in a repo's own git settings can run
 - events go into a queue in `~/.steer` and get sent to the server in the background, so your tools never wait on the network
@@ -51,11 +52,13 @@ when you change code or commit in a repo you used ai in, the watcher sends one o
 
 each batch of events also says what time your computer thinks it is, so if your clock is off the server can fix the times instead of dropping them.
 
+for prompts from t3 code, steer reads two things from t3's database: which thread the session belongs to, and that thread's last 20 messages, to find the prompt and see who wrote it. none of it is kept or sent.
+
 project is the name of the git repo or folder you were in (your home folder shows up as "home"). your page is public.
 
 ## how time is counted
 
-the bottom of every report explains it, and the code is in `src/analyze.rs` (and `web/steer.js` for the website and server, which gives the same numbers). short version: the gap between the agent finishing and your next prompt counts, with caps, and loops of "continue" / "fix it" without testing dont count.
+the bottom of every report explains it, and the code is in `src/analyze.rs` (and `web/steer.js` for the website and server, which gives the same numbers). short version: the gap between the agent finishing and your next prompt counts, with caps, and loops of "continue" / "fix it" without testing dont count. prompts sent with `claude -p` dont count either, since that's how scripts and agents run claude code.
 
 ## other commands
 

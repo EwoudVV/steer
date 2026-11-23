@@ -2,6 +2,9 @@
 // the Rust CLI, so the two can be compared:
 //   node tests/parity.mjs [folder] [days|all]
 //   ./target/release/steer --days 30
+// The CLI also counts the prompts from T3 Code that T3's database says the person
+// wrote, and the browser can't read that. On a computer with T3, give the CLI
+// T3CODE_HOME=/nowhere so both go by the logs alone.
 
 import { createReadStream, readdirSync, statSync } from "node:fs";
 import { createInterface } from "node:readline";

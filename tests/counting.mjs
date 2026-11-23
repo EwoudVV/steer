@@ -4,7 +4,7 @@
 //   node tests/counting.mjs
 
 import assert from "node:assert/strict";
-import { analyzePrompt, applyCaps, buildReport, checks, gapCredit, projectHuman, projectOverlap, rulesFrom } from "../web/steer.js";
+import { SessionReader, analyzePrompt, applyCaps, buildReport, checks, gapCredit, projectHuman, projectOverlap, rulesFrom } from "../web/steer.js";
 
 const T0 = Date.UTC(2026, 10, 20, 15, 0, 0);
 const sec = (s) => T0 + s * 1000;
@@ -234,6 +234,36 @@ assert.deepEqual(checks(reportOf([session("normal", honest())])), []);
   const nightNotes = checks(night).flatMap((d) => d.notes).join(" | ");
   assert.match(nightNotes, /counted in 24 hours/);
   assert.doesNotMatch(nightNotes, /counted in one day/, "each day alone is under 12h");
+}
+
+// 14. Agents in T3 Code that prompt each other (a task one hands another, a message to
+// another thread, a scheduled task) show up in Claude Code's log as "sdk", the same as
+// the person typing in T3 or in any other app on the Agent SDK. Only T3's database can
+// tell them apart, so from the log alone T3's "sdk" turns don't count.
+{
+  const line = (uuid, extra) =>
+    JSON.stringify({ type: "user", uuid, timestamp: "2026-11-22T20:00:00.000Z", promptSource: "sdk", turnOrigin: "sdk", message: { role: "user", content: "add a pause menu to main.rs" }, ...extra });
+  const prompts = (...entrypoints) => {
+    const reader = new SessionReader("p/t3.jsonl");
+    entrypoints.forEach((entrypoint, i) => reader.line(line(`p${i}`, { entrypoint })));
+    return (reader.finish()?.events ?? []).filter((e) => e.kind === "prompt").length;
+  };
+  assert.equal(prompts("sdk-ts", "sdk-ts"), 2, "other apps on the sdk count like before");
+  // `claude -p` is how scripts and agents run Claude Code (T3 names its threads with it).
+  assert.equal(prompts("sdk-cli"), 0);
+  assert.equal(prompts("t3-code"), 0);
+  // Before November 2026 T3's lines said "sdk-ts". One "t3-code" line makes it T3's,
+  // and so does T3's own tools showing up in the log.
+  assert.equal(prompts("sdk-ts", "t3-code"), 0);
+  const tools = new SessionReader("p/old-t3.jsonl");
+  tools.line(line("q0", { entrypoint: "sdk-ts" }));
+  tools.line(JSON.stringify({ type: "attachment", attachment: { type: "deferred_tools_delta", addedNames: ["Read", "mcp__t3-code__delegate_task"] } }));
+  assert.equal(tools.finish(), null);
+  // Tool results and rejections are the agent's turn, not something T3 sent, so they stay.
+  const turns = new SessionReader("p/t3-tools.jsonl");
+  turns.line(line("r0", { entrypoint: "t3-code" }));
+  turns.line(JSON.stringify({ type: "user", uuid: "r1", timestamp: "2026-11-22T20:00:05.000Z", entrypoint: "sdk-ts", turnOrigin: "sdk", toolDenialKind: "user-rejected", message: { role: "user", content: [{ type: "tool_result", content: "no" }] } }));
+  assert.deepEqual(turns.finish().events.map((e) => e.kind), ["rejected"]);
 }
 
 console.log("counting tests passed");

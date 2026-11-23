@@ -513,6 +513,15 @@ pub fn doctor() -> i32 {
         (true, false) => Check::Fix("cursor hooks are off, run steer setup".into()),
         (false, false) => Check::Info("cursor isn't installed".into()),
     });
+    if let Some((db, readable)) = crate::t3::check() {
+        checks.push(match readable {
+            Ok(()) => Check::Ok("t3 code's database can be read, so the prompts you type there count".into()),
+            Err(e) => Check::Fix(format!(
+                "can't read t3 code's database at {} ({e}), so prompts sent through t3 code don't count. updating steer might fix it",
+                db.display()
+            )),
+        });
+    }
     checks.push(if watch::running() {
         Check::Ok("the watcher (codex, opencode, copilot, freebuff, saves and commits) is running".into())
     } else {

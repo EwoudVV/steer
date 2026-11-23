@@ -26,7 +26,7 @@ mkdirSync(join(home, "proj"));
 // STEER_SANDBOX keeps steer away from things that aren't under HOME (launchd, systemd,
 // the registry, the Windows PATH).
 const env = { ...process.env, HOME: home, USERPROFILE: home, STEER_NO_BROWSER: "1", STEER_SANDBOX: "1" };
-for (const k of ["STEER_HOME", "CODEX_HOME", "COPILOT_HOME", "XDG_DATA_HOME", "ZDOTDIR", "STEER_NO_UPDATE", "HCA_CLIENT_ID", "HCA_CLIENT_SECRET"]) delete env[k];
+for (const k of ["STEER_HOME", "CODEX_HOME", "COPILOT_HOME", "XDG_DATA_HOME", "ZDOTDIR", "STEER_NO_UPDATE", "HCA_CLIENT_ID", "HCA_CLIENT_SECRET", "T3CODE_HOME", "T3CODE_THREAD_ID"]) delete env[k];
 env.STEER_RELEASES = `http://127.0.0.1:${RELEASES_PORT}/releases`;
 
 // On Mac and Linux install adds steer to the PATH in the shell's startup file.

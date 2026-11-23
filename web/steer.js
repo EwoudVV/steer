@@ -119,6 +119,8 @@ const SKIP = [
 // Lines that can't be a user, assistant or title entry get skipped without parsing.
 // Claude Code writes compact JSON, so the type always looks like "type":"user".
 const WANTED = ['"type":"user"', '"type":"assistant"', '"type":"custom-title"', '"type":"ai-title"'];
+// Every agent T3 Code runs gets T3's own tools, and the log lists them.
+const T3_TOOLS = '"mcp__t3-code__';
 
 /** Feed one session file line by line, then call finish(). */
 export class SessionReader {
@@ -128,9 +130,19 @@ export class SessionReader {
     this.cwd = null;
     this.customTitle = null;
     this.aiTitle = null;
+    // T3 only started marking its lines "t3-code" in November 2026, so one marked line
+    // makes the whole session T3's, and so do T3's own tools (see finish).
+    this.t3 = false;
+    this.sdk = [];
   }
 
   line(s) {
+    if (s && !this.t3 && s.includes(T3_TOOLS)) {
+      try {
+        const ty = JSON.parse(s)?.type;
+        if (ty === "attachment" || ty === "assistant") this.t3 = true;
+      } catch {}
+    }
     if (!s || !WANTED.some((w) => s.includes(w))) return;
     let v;
     try {
@@ -147,14 +159,21 @@ export class SessionReader {
     const t = typeof v.timestamp === "string" ? Date.parse(v.timestamp) : NaN;
     if (Number.isNaN(t)) return;
     if (this.cwd === null) this.cwd = str(v.cwd);
+    if (v.entrypoint === "t3-code") this.t3 = true;
     const e = ty === "assistant" ? assistantEvent(v, t) : userEvent(v, t);
     if (e) {
       e.id = str(v.uuid);
+      if (ty === "user" && e.kind !== "agent" && e.kind !== "rejected" && sentBySdk(v)) this.sdk.push(this.events.length);
       this.events.push(e);
     }
   }
 
   finish() {
+    // In a session T3 ran, unmarked SDK turns don't count either (see userEvent).
+    if (this.t3 && this.sdk.length > 0) {
+      const unverified = new Set(this.sdk);
+      this.events = this.events.filter((_, i) => !unverified.has(i));
+    }
     if (this.events.length === 0) return null;
     this.events.sort((a, b) => a.t - b.t);
     return { path: this.path, cwd: this.cwd, title: this.customTitle ?? this.aiTitle, events: this.events };
@@ -170,6 +189,12 @@ function assistantEvent(v, t) {
   return { t, kind: "agent", tools };
 }
 
+/** Whether a turn came in through the Claude Agent SDK. */
+function sentBySdk(v) {
+  const originKind = v.origin && typeof v.origin === "object" ? v.origin.kind : undefined;
+  return [originKind, v.turnOrigin, v.promptSource].includes("sdk");
+}
+
 function userEvent(v, t) {
   for (const f of ["isMeta", "isCompactSummary", "isVisibleInTranscriptOnly", "isVirtual"]) {
     if (v[f] === true) return null;
@@ -182,11 +207,16 @@ function userEvent(v, t) {
   }
 
   const originKind = v.origin && typeof v.origin === "object" ? v.origin.kind : undefined;
-  // "sdk" is a person typing in an app built on the Claude Agent SDK, like T3 Code.
+  // "sdk" is a person typing in an app built on the Claude Agent SDK, except in T3 Code.
   const fromPerson = (s) => s === "human" || s === "sdk";
   if (typeof originKind === "string" && !fromPerson(originKind)) return null;
   if (typeof v.turnOrigin === "string" && !fromPerson(v.turnOrigin)) return null;
   if (v.promptSource === "system") return null;
+  // T3 Code sends what agents write to each other through the SDK too, and only its own
+  // database can tell that apart from what the person typed. The browser can't read it
+  // (steer report does), so T3's "sdk" turns don't count here. `claude -p` marks its
+  // turns "sdk" too, but that's how scripts and agents run Claude Code.
+  if ((v.entrypoint === "t3-code" || v.entrypoint === "sdk-cli") && sentBySdk(v)) return null;
 
   const [raw, images] = extractText(content);
   const text = stripTag(raw, "system-reminder").trim();

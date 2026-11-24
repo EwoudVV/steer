@@ -1088,7 +1088,7 @@ ${text.split("\n\n").map((l) => `<p>${esc(l)}</p>`).join("\n")}
         ? ` Each one was looked up on GitHub when this page was made: is it there, and does GitHub's time match when steer saw it.`
         : " Each links to it on GitHub, so you can check it's there and what it changed."
       : " No GitHub repo was given, so compare these with the project's git log.";
-    h += `<h2>Commits</h2>\n<p class="muted">Seen by steer when they were made.${about}</p>\n<div class="scroll"><table class="list">\n<tr><th>When steer saw it (UTC)</th><th>Commit</th>${checks ? "<th>On GitHub</th>" : ""}</tr>\n`;
+    h += `<h2>Commits</h2>\n<p class="muted">Seen by steer when they were made. Only the person's own: commits the agent made while it was working are left out.${about}</p>\n<div class="scroll"><table class="list">\n<tr><th>When steer saw it (UTC)</th><th>Commit</th>${checks ? "<th>On GitHub</th>" : ""}</tr>\n`;
     const shown = (t) => new Date(t).toISOString().slice(0, 16).replace("T", " ");
     for (const c of f.commits) {
       const hash = c.hash ? (repo ? `<a href="${esc(`${repo}/commit/${c.hash}`)}">${esc(c.hash.slice(0, 12))}</a>` : `<code>${esc(c.hash.slice(0, 12))}</code>`) : "";

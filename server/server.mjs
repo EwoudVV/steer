@@ -1155,6 +1155,7 @@ async function decide(req, res, id) {
   if (!fromHere(req)) return send(res, 403, "This form only works from the review page.");
   const r = readReview(id);
   if (!r) return send(res, 404, "No such review page");
+  if (ownHours(r, who)) return send(res, 403, "These are your own hours, someone else has to review them.");
   const body = await readBody(req, 10_000);
   if (body === TOO_BIG) return tooLarge(req, res);
   const form = new URLSearchParams(body);
@@ -1176,6 +1177,11 @@ async function decide(req, res, id) {
   res.end();
 }
 
+/** A reviewer looking at hours from their own Hack Club account, which they can't review. */
+function ownHours(r, who) {
+  return Boolean(r.slack_id) && r.slack_id === who?.slack;
+}
+
 function decisionsHtml(r, decisions, who) {
   let h = "";
   if (decisions.length) {
@@ -1186,7 +1192,9 @@ function decisionsHtml(r, decisions, who) {
     }
     h += `</ul>\n<p><b>Hours after review: ${esc(reviewedHours(r, decisions))}h</b></p>\n`;
   }
-  if (who) {
+  if (who && ownHours(r, who)) {
+    h += `<h2>Your review</h2>\n<p class="muted">Signed in as ${esc(who.name)} (${esc(who.slack)}). These are your own hours, so someone else has to review them.</p>\n`;
+  } else if (who) {
     h += `<h2>Your review</h2>
 <p class="muted">Signed in as ${esc(who.name)} (${esc(who.slack)}). The person sees what you pick and your note.</p>
 <form method="post" action="/r/${r.id}/decide">
@@ -1227,9 +1235,11 @@ function reviewPage(req, res, id) {
   if (!r) return send(res, 404, "No such review page");
   const who = reviewerOf(req);
   const u = encodeURIComponent(r.user);
+  // The sign-in goes at the top: a review page is long, and reviewers are who it's for.
+  const signIn = who ? "" : `<p class="muted">Fraud squad or a program reviewer? <a href="/reviewer/login?r=${id}">Sign in to approve, cut or reject these hours</a>.</p>\n`;
   const body = `<h1>Review: <a href="/u/${u}">${esc(r.user)}</a> / <a href="/u/${u}/${encodeURIComponent(r.project)}">${esc(r.project)}</a></h1>
-${decisionsHtml(r, decisionsOf(id), who)}${r.html}
-<p class="muted">Every event behind this page, with when the server got it: <a href="/api/r/${id}/events">/api/r/${id}/events</a>. How steer catches faked time: <a href="/trust">/trust</a>.${who ? "" : ` Fraud squad or a program reviewer? <a href="/reviewer/login?r=${id}">Sign in to approve, cut or reject these hours</a>.`}</p>`;
+${signIn}${decisionsHtml(r, decisionsOf(id), who)}${r.html}
+<p class="muted">Every event behind this page, with when the server got it: <a href="/api/r/${id}/events">/api/r/${id}/events</a>. How steer catches faked time: <a href="/trust">/trust</a>.</p>`;
   page(res, `review · ${r.user} / ${r.project}`, body, who ? { csp: PAGE_CSP.replace("form-action 'none'", "form-action 'self'") } : {});
 }
 

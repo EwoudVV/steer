@@ -54,7 +54,8 @@ const server = spawn("node", ["server/server.mjs"], {
     HCA_CLIENT_ID: "test-client",
     HCA_CLIENT_SECRET: "test-secret",
     HCA_BASE: `http://127.0.0.1:${FAKE_PORT}`,
-    STEER_REVIEWERS: "UREVIEW1, UREVIEW2",
+    // U123 is also the account the review below belongs to.
+    STEER_REVIEWERS: "UREVIEW1, UREVIEW2, U123",
   },
   stdio: "ignore",
 });
@@ -278,6 +279,25 @@ try {
     assert.equal(info.reviewed_hours, "0.0");
     assert.equal(info.decisions[0].by, "UREVIEW1");
     assert.equal((await json("/api/slack/U123")).body.accounts[0].reviews[0].reviewed_hours, "0.0");
+    assert.ok(!after.includes("</h1>\n<h2>Reviewed"), "the sign in link comes first for someone not signed in");
+    assert.match(after, /<\/h1>\n<p class="muted">Fraud squad or a program reviewer\?/);
+
+    // A reviewer can't review hours from their own Hack Club account.
+    nextUser = { sub: "ident!self", nickname: "duck", slack_id: "U123" };
+    const own = await signIn();
+    assert.equal(own.status, 303);
+    const ownCookie = own.headers.get("set-cookie").split(";")[0];
+    const ownView = await (await fetch(STEER + path, { headers: { cookie: ownCookie } })).text();
+    assert.ok(!ownView.includes("<form"), "no form on your own hours");
+    assert.match(ownView, /These are your own hours, so someone else has to review them/);
+    const ownTry = await fetch(`${STEER}${path}/decide`, {
+      method: "POST",
+      headers: { cookie: ownCookie, origin: STEER, "sec-fetch-site": "same-origin" },
+      body: new URLSearchParams({ csrf: "x", action: "approve" }),
+      redirect: "manual",
+    });
+    assert.equal(ownTry.status, 403);
+    assert.equal((await json(`/api${path}`)).body.decisions.length, 1, "nothing got added");
   }
 
   // 9. The same server at its other address (steer.dino.icu): someone who comes in there

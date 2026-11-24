@@ -23,6 +23,10 @@ pub struct Event {
     pub id: Option<u64>,
     pub t: DateTime<Utc>,
     pub kind: EventKind,
+    /// The model that answered (or was asked), if the tool's log says.
+    pub model: Option<String>,
+    /// Tokens spent on this turn, if the tool's log says.
+    pub tokens: Option<u64>,
 }
 
 impl Event {

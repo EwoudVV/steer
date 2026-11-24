@@ -95,7 +95,9 @@ fn changes(messages: &[Value], seen: &mut Map<String, Value>, session: &str, pro
                 if before.is_none() && !quiet {
                     let text = m["content"].as_str().unwrap_or_default();
                     let images = m["attachments"].as_array().map_or(0, Vec::len);
-                    out.push(prompt_event(new_id(), session, project, VIA, now, &PromptInfo::analyze(text, images)));
+                    let model = m.get("model").and_then(Value::as_str);
+                    let tokens = m.get("usage").and_then(|u| u.get("output_tokens")).and_then(Value::as_u64);
+                    out.push(prompt_event(new_id(), session, project, VIA, now, &PromptInfo::analyze_with(text, images, model, tokens)));
                 }
                 seen.insert(id.into(), json!([0, true]));
             }

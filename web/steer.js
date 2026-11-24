@@ -283,11 +283,17 @@ function toolGroup(name) {
   return 6;
 }
 
+// First model name that appeared during an agent segment, or null.
+function segModels(seg) {
+  for (const m of seg.models ?? []) return m;
+  return null;
+}
+
 const secs = (a, b) => Math.trunc((a - b) / 1000);
 const isHuman = (e) => e.kind !== "agent";
 
 function segment(ev, from, to, start) {
-  const seg = { agent: 0, last: null, tools: [0, 0, 0, 0, 0, 0, 0] };
+  const seg = { agent: 0, last: null, tools: [0, 0, 0, 0, 0, 0, 0], models: [], tokens: 0 };
   let prev = start;
   for (let i = from; i < to; i++) {
     const e = ev[i];
@@ -297,6 +303,8 @@ function segment(ev, from, to, start) {
     prev = e.t;
     seg.last = e.t;
     for (const n of e.tools) seg.tools[toolGroup(n)]++;
+    if (e.model) seg.models.push(e.model);
+    if (typeof e.tokens === "number" && Number.isFinite(e.tokens)) seg.tokens += e.tokens;
   }
   return seg;
 }
@@ -456,6 +464,9 @@ export function analyzeSession(session, rule = RULE) {
       // For evidence: the command's name and exit code, or how many files were saved.
       detail:
         e.kind === "run" ? { name: e.name, exit: e.exit } : e.kind === "save" ? { count: e.count ?? 1 } : e.kind === "commit" ? { hash: e.hash ?? null } : null,
+      // Which model ran the agent, and how many tokens it used (input + output).
+      model: segModels(segs[k]) ?? e.prompt?.model ?? null,
+      tokens: segs[k].tokens || (e.prompt?.tokens ?? 0),
     });
     loopy.push(isLoopy);
     typing.push(typed);
@@ -508,6 +519,22 @@ export const projectHuman = (p) => sum(p.sessions, sessionHuman);
 export const projectAgent = (p) => sum(p.sessions, sessionAgent);
 export const projectFlagged = (p) => sum(p.sessions, sessionFlagged);
 export const projectOverlap = (p) => sum(p.sessions, sessionOverlap);
+export const projectTokens = (p) => sum(p.sessions, (s) => s.turns.reduce((n, t) => n + (t.tokens || 0), 0));
+
+/** Models used in a project, and how many tokens each one used. Map of name -> tokens. */
+export function projectModels(p) {
+  const by = new Map();
+  for (const s of p.sessions) for (const t of s.turns) if (t.model) by.set(t.model, (by.get(t.model) ?? 0) + (t.tokens || 0));
+  return by;
+}
+
+/** Compact token count: "1.2M", "345k", or the number itself. */
+export function fmtTokens(n) {
+  n = n || 0;
+  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(n >= 10_000_000 ? 0 : 1)}M`;
+  if (n >= 1000) return `${(n / 1000).toFixed(n >= 10_000 ? 0 : 1)}k`;
+  return String(n);
+}
 
 /**
  * Several sessions at once (two windows, two tools, two computers) would each count the
@@ -547,7 +574,11 @@ function comparePaths(a, b) {
 function projectName(cwd) {
   if (!cwd) return "unknown";
   const parts = cwd.split(/[\\/]/).filter(Boolean);
-  return parts.length ? parts[parts.length - 1] : cwd;
+  let name = parts.length ? parts[parts.length - 1] : cwd;
+  // Normalize: lowercase, replace dashes with spaces, collapse whitespace
+  name = name.toLowerCase().replace(/-/g, ' ');  // dashes to spaces
+  name = name.replace(/\s+/g, ' ');  // collapse multiple spaces
+  return name.trim();
 }
 
 /**
@@ -978,6 +1009,8 @@ export function reviewFacts(p) {
     specific: prompts.filter((t) => t.tags.includes("specific")).length,
     tested: prompts.filter((t) => testedHow(t) !== null).length,
     lowInfo: prompts.filter((t) => t.tags.includes("low info")).length,
+    tokens: sum(p.sessions, projectTokens),
+    models: projectModels(p).size,
     commits: turns
       .filter((t) => t.kind === "commit")
       .map((t) => ({ t: t.t, hash: t.detail?.hash ?? null }))
@@ -1006,7 +1039,8 @@ export function justification(name, project, f, found, checks = null) {
   lines.push(
     `steer counted ${fmtDur(f.you)} of ${name}'s own time on ${project} ${span}, over ${plural(f.days, "day")} and ${plural(f.sessions, "session")} with an AI agent. ` +
       `That's the time spent writing ${plural(f.prompts, "prompt")}, reading and testing what the agent did, and changing code by hand. ` +
-      `The ${fmtDur(f.agent)} the agent ran by itself isn't counted.`,
+      `The ${fmtDur(f.agent)} the agent ran by itself isn't counted.` +
+      (f.tokens ? ` Across ${f.sessions} session${f.sessions === 1 ? "" : "s"}, ${f.prompts} prompt${f.prompts === 1 ? "" : "s"} used ${fmtTokens(f.tokens)} tokens across ${f.models} model${f.models === 1 ? "" : "s"}.` : "")
   );
   if (f.prompts) {
     let l = `${share(f.specific, f.prompts)} of the prompts named files or code, and ${share(f.tested, f.prompts)} came after testing (a screenshot, a description of what happened, or a command run first).`;
@@ -1133,6 +1167,9 @@ export function renderReport(
   const flagged = sum(projects, projectFlagged);
   const overlap = sum(projects, projectOverlap);
   const capped = sum(projects, (p) => sum(p.sessions, (s) => s.turns.reduce((n, t) => n + (t.capped ?? 0), 0)));
+  const tokens = sum(projects, projectTokens);
+  const models = new Map();
+  for (const p of projects) for (const [m, n] of projectModels(p)) models.set(m, (models.get(m) ?? 0) + n);
   const sessions = sum(projects, (p) => p.sessions.length);
   let h = "";
 
@@ -1144,7 +1181,7 @@ export function renderReport(
 <tr><th>1/3 rule</th><td>${fmtDur(Math.trunc(agent / 3))}</td></tr>
 <tr><th>Dark flow (not counted)</th><td>${fmtDur(flagged)}</td></tr>
 <tr><th>Sessions at the same time (counted once)</th><td>${fmtDur(overlap)}</td></tr>
-${capped > 0 ? `<tr><th>Past the ${rules.dailyCapHours}h a day or ${rules.weeklyCapHours}h a week cap (not counted)</th><td>${fmtDur(capped)}</td></tr>\n` : ""}</table>
+${tokens > 0 ? `<tr><th>Tokens (input + output)</th><td>${fmtTokens(tokens)}${models.size ? ` across ${models.size} ${models.size === 1 ? "model" : "models"}` : ""}</td></tr>\n` : ""}${capped > 0 ? `<tr><th>Past the ${rules.dailyCapHours}h a day or ${rules.weeklyCapHours}h a week cap (not counted)</th><td>${fmtDur(capped)}</td></tr>\n` : ""}</table>
 `;
 
   const scale = Math.max(1, ...projects.map((p) => Math.max(projectHuman(p), projectAgent(p))));
@@ -1152,13 +1189,13 @@ ${capped > 0 ? `<tr><th>Past the ${rules.dailyCapHours}h a day or ${rules.weekly
 
   h += `<h2>Projects</h2>
 <div class="scroll"><table class="list">
-<tr><th>Project</th><th class="r">Sessions</th><th class="r">Your time</th><th class="r">Agent time</th><th class="r">1/3 rule</th><th class="bars">Black: you, gray: agent</th></tr>
+<tr><th>Project</th><th class="r">Sessions</th><th class="r">Your time</th><th class="r">Agent time</th><th class="r">1/3 rule</th><th class="bars">Black: you, gray: agent</th><th class="r">Tokens</th></tr>
 `;
   for (const p of projects) {
     const ph = projectHuman(p);
     const pa = projectAgent(p);
     const name = projectLink ? `<a href="${esc(projectLink(p.name))}">${esc(p.name)}</a>` : esc(p.name);
-    h += `<tr><td>${name}</td><td class="r">${p.sessions.length}</td><td class="r">${fmtDur(ph)}</td><td class="r">${fmtDur(pa)}</td><td class="r">${fmtDur(Math.trunc(pa / 3))}</td><td class="bars"><div class="bar you" style="width:${pct(ph, scale).toFixed(2)}%"></div><div class="bar agent" style="width:${pct(pa, scale).toFixed(2)}%"></div></td></tr>\n`;
+    h += `<tr><td>${name}</td><td class="r">${p.sessions.length}</td><td class="r">${fmtDur(ph)}</td><td class="r">${fmtDur(pa)}</td><td class="r">${fmtDur(Math.trunc(pa / 3))}</td><td class="bars"><div class="bar you" style="width:${pct(ph, scale).toFixed(2)}%"></div><div class="bar agent" style="width:${pct(pa, scale).toFixed(2)}%"></div></td><td class="r">${fmtTokens(projectTokens(p))}</td></tr>\n`;
   }
   h += "</table></div>\n";
   if (!showSessions) return h;
@@ -1195,7 +1232,7 @@ function renderSession(s, hideTitles) {
     const before = t.human + t.flagged + t.overlap + (t.capped ?? 0);
     const you = before !== t.human ? `${fmtDur(t.human)} (was ${fmtDur(before)})` : fmtDur(t.human);
     const did = TOOL_GROUPS.map((g, i) => [g, t.tools[i]]).filter(([, n]) => n > 0).map(([g, n]) => plural(n, g));
-    h += `<tr${t.darkFlow ? ' class="flow"' : ""}><td>${when}</td><td>${action}</td><td title="${esc(note.long)}">${note.short}</td><td class="r">${you}</td><td class="r">${t.agent > 0 ? fmtDur(t.agent) : ""}</td><td>${did.join(", ")}</td></tr>\n`;
+    h += `<tr${t.darkFlow ? ' class="flow"' : ""}><td>${when}</td><td>${action}</td><td title="${esc(note.long)}">${note.short}</td><td class="r">${you}</td><td class="r">${t.agent > 0 ? fmtDur(t.agent) : ""}</td><td class="r">${did.join(", ")}</td><td class="r">${fmtTokens(t.tokens)}${t.model ? ` (${esc(t.model)})` : ""}</td></tr>\n`;
   }
   return h + "</table></div>\n</details>\n";
 }

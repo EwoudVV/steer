@@ -2,18 +2,27 @@ use chrono::{DateTime, TimeZone, Utc};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+/// Normalize a project name: lowercase, treat spaces and dashes as equivalent,
+/// and collapse multiple spaces/dashes into single spaces.
+/// "Vault Books", "vault-books", "VAULT_BOOKS" → "vault books"
+fn normalize(name: &str) -> String {
+    let mut t = name.to_lowercase();
+    t = t.replace('-', " ");
+    t.split_whitespace().collect::<Vec<&str>>().join(" ")
+}
+
 /// Project name and git root for a session's working folder.
 pub fn project_for(cwd: Option<&str>) -> (String, Option<PathBuf>) {
-    let Some(cwd) = cwd else { return ("unknown".into(), None) };
+    let Some(cwd) = cwd else { return (normalize("unknown"), None) };
     let start = Path::new(cwd);
     let mut dir = Some(start);
     while let Some(d) = dir {
         if d.join(".git").exists() {
-            return (base_name(d), Some(d.to_path_buf()));
+            return (normalize(&base_name(d)), Some(d.to_path_buf()));
         }
         dir = d.parent();
     }
-    (base_name(start), None)
+    (normalize(&base_name(start)), None)
 }
 
 fn base_name(p: &Path) -> String {

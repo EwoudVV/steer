@@ -15,27 +15,7 @@ use std::process::{Command, Stdio};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 pub const DEFAULT_SERVER: &str = "https://steer.duck.hackclub.app";
-/// Claude Code's hooks steer uses. PermissionRequest fires the moment a permission prompt
-/// shows (its Notification only comes after ~6 seconds, so quick answers would be
-/// missed), and the tool hooks carry how long each tool ran, which is when the person
-/// answered the prompt.
-const HOOK_EVENTS: [&str; 5] = ["UserPromptSubmit", "PostToolUse", "PostToolUseFailure", "Stop", "PermissionRequest"];
-/// Hooks only newer Claude Code knows, and the first version known to have each. Before
-/// 2.1.101, a hook name Claude Code didn't know made it ignore the whole settings file
-/// (changelog 2.1.101), so these are only added once the Claude Code here is new enough,
-/// going by the version in its newest session log. The watcher adds them later once
-/// Claude Code updates.
-const NEWER_HOOKS: [(&str, (u32, u32, u32)); 2] = [("PermissionRequest", PERMISSION_REQUEST_SINCE), ("PostToolUseFailure", POST_TOOL_USE_FAILURE_SINCE)];
-/// Changelog 2.0.45: "Added PermissionRequest hook".
-const PERMISSION_REQUEST_SINCE: (u32, u32, u32) = (2, 0, 45);
-/// When it was added isn't in the changelog. 2.1.119 is the first version that mentions
-/// it ("PostToolUse and PostToolUseFailure hook inputs now include duration_ms").
-const POST_TOOL_USE_FAILURE_SINCE: (u32, u32, u32) = (2, 1, 119);
-/// Hooks that need a matcher, since they're about tools.
-const TOOL_HOOKS: [&str; 3] = ["PostToolUse", "PostToolUseFailure", "PermissionRequest"];
-/// Claude Code's permission modes, sent with each prompt so the counting knows whether
-/// permission prompts could happen at all.
-const MODES: [&str; 6] = ["default", "plan", "acceptEdits", "auto", "dontAsk", "bypassPermissions"];
+const HOOK_EVENTS: [&str; 3] = ["UserPromptSubmit", "PostToolUse", "Stop"];
 const BATCH: usize = 500;
 
 pub(crate) fn home() -> PathBuf {
@@ -162,7 +142,7 @@ fn record_cursor(which: &str) -> Option<()> {
         }
         "tool" => {
             let tool = v.get("tool_name").and_then(Value::as_str).unwrap_or("tool");
-            tool_event(new_id(), session, &project, "cursor", Utc::now(), tool)
+            tool_event(new_id(), session, &project, "cursor", Utc::now(), tool, None, None)
         }
         "stop" => event(new_id(), session, &project, "cursor", Utc::now(), "stop"),
         _ => return None,
@@ -178,20 +158,10 @@ fn record() -> Option<()> {
     let mut input = String::new();
     std::io::stdin().take(20_000_000).read_to_string(&mut input).ok()?;
     let v: Value = serde_json::from_str(&input).ok()?;
-    let e = claude_event(&v)?;
-    enqueue(&[e])?;
-    if !flushing() {
-        spawn_flush();
-    }
-    Some(())
-}
-
-/// The event for one Claude Code hook call, if it's one steer sends.
-fn claude_event(v: &Value) -> Option<Value> {
     let session = v.get("session_id")?.as_str()?;
     let cwd = v.get("cwd").and_then(Value::as_str).unwrap_or("");
+
     let project = project_name(cwd);
-    let now = Utc::now();
     let e = match v.get("hook_event_name")?.as_str()? {
         "UserPromptSubmit" => {
             let text = v.get("prompt")?.as_str()?.trim();
@@ -202,40 +172,24 @@ fn claude_event(v: &Value) -> Option<Value> {
             if crate::claude::injected(text) {
                 return None;
             }
-            let mut e = prompt_event(new_id(), session, &project, "claude-code", now, &PromptInfo::analyze(text, 0));
-            if let Some(mode) = v.get("permission_mode").and_then(Value::as_str).filter(|m| MODES.contains(m)) {
-                e["mode"] = mode.into();
-            }
+            let mut e = prompt_event(new_id(), session, &project, "claude-code", Utc::now(), &PromptInfo::analyze(text, 0));
             if let Some(log) = v.get("transcript_path").and_then(Value::as_str) {
                 e["check"] = json!({ "log": log, "key": crate::claude::prompt_key(text) });
             }
             e
         }
-        // The person stopped a tool while it ran.
-        "PostToolUseFailure" if v.get("is_interrupt").and_then(Value::as_bool) == Some(true) => {
-            event(new_id(), session, &project, "claude-code", now, "interrupt")
-        }
-        "PostToolUse" | "PostToolUseFailure" => {
+        "PostToolUse" => {
             let tool = v.get("tool_name").and_then(Value::as_str).unwrap_or("");
-            let mut e = tool_event(new_id(), session, &project, "claude-code", now, tool);
-            // How long it ran: for a tool that needed permission, it started when the
-            // person said yes. For AskUserQuestion and ExitPlanMode, it's the person
-            // answering or reading the plan.
-            if let Some(ms) = v.get("duration_ms").and_then(Value::as_u64) {
-                e["ms"] = ms.min(86_400_000).into();
-            }
-            e
+            tool_event(new_id(), session, &project, "claude-code", Utc::now(), tool, None, None)
         }
-        // A permission prompt just showed. Nothing about the tool or command is sent.
-        "PermissionRequest" => {
-            let mut e = event(new_id(), session, &project, "claude-code", now, "wait");
-            e["reason"] = "permission".into();
-            e
-        }
-        "Stop" => event(new_id(), session, &project, "claude-code", now, "stop"),
+        "Stop" => event(new_id(), session, &project, "claude-code", Utc::now(), "stop"),
         _ => return None,
     };
-    Some(e)
+    enqueue(&[e])?;
+    if !flushing() {
+        spawn_flush();
+    }
+    Some(())
 }
 
 // ---------- events (shared by the hook and the watcher) ----------
@@ -252,9 +206,20 @@ pub(crate) fn event(id: String, session: &str, project: &str, via: &str, t: Date
     })
 }
 
-pub(crate) fn tool_event(id: String, session: &str, project: &str, via: &str, t: DateTime<Utc>, tool: &str) -> Value {
+pub(crate) fn tool_event(
+    id: String,
+    session: &str,
+    project: &str,
+    via: &str,
+    t: DateTime<Utc>,
+    tool: &str,
+    model: Option<&str>,
+    tokens: Option<u64>,
+) -> Value {
     let mut e = event(id, session, project, via, t, "tool");
     e["tool"] = tool.into();
+    e["model"] = model.map(str::to_owned).into();
+    e["tokens"] = tokens.into();
     e
 }
 
@@ -275,6 +240,8 @@ pub(crate) fn prompt_event(
     e["observation"] = p.observation.into();
     e["generic"] = p.generic.into();
     e["repeat"] = is_repeat(session, p).into();
+    e["model"] = p.model.clone().into();
+    e["tokens"] = p.tokens.into();
     e
 }
 
@@ -284,9 +251,8 @@ pub(crate) fn enqueue(events: &[Value]) -> Option<()> {
         return Some(());
     }
     fs::create_dir_all(dir()).ok()?;
-    // When an AI tool was last used, for check-ins and the idle timer (which don't count
-    // as use themselves).
-    if events.iter().any(|e| !matches!(e["kind"].as_str(), Some("checkin" | "away" | "back" | "here"))) {
+    // When an AI tool was last used, for check-ins (which don't count as use themselves).
+    if events.iter().any(|e| e["kind"] != "checkin") {
         let now = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
         let _ = fs::write(dir().join("last-activity"), now.to_string());
     }
@@ -296,17 +262,19 @@ pub(crate) fn enqueue(events: &[Value]) -> Option<()> {
     queue.write_all(lines.as_bytes()).ok()
 }
 
-/// Whether an AI tool was used in the last `secs` seconds.
-pub(crate) fn active_within(now: u64, secs: u64) -> bool {
-    fs::read_to_string(dir().join("last-activity"))
-        .ok()
-        .and_then(|s| s.trim().parse::<u64>().ok())
-        .is_some_and(|t| now.saturating_sub(t) <= secs)
-}
-
 pub(crate) fn new_id() -> String {
     let nanos = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0);
     format!("{:x}-{:x}", nanos, std::process::id())
+}
+
+/// Normalize a project name: lowercase, treat spaces and dashes as equivalent,
+/// and collapse multiple spaces/dashes into single spaces.
+/// "Vault Books", "vault-books", "VAULT_BOOKS" → "vault books"
+fn normalize(name: &str) -> String {
+    let mut t = name.to_lowercase();
+    t = t.replace('-', " ");
+    let parts: Vec<&str> = t.split_whitespace().collect();
+    parts.join(" ")
 }
 
 /// Folder name of the git repo the session is in, or of the folder itself. The home
@@ -315,10 +283,10 @@ pub(crate) fn new_id() -> String {
 pub(crate) fn project_name(cwd: &str) -> String {
     let start = Path::new(cwd);
     if cwd.is_empty() {
-        return "unknown".into();
+        return normalize("unknown");
     }
     if start == home() {
-        return "home".into();
+        return normalize("home");
     }
     let home = home();
     let mut d = Some(start);
@@ -330,14 +298,19 @@ pub(crate) fn project_name(cwd: &str) -> String {
         }
         if p.join(".git").exists() {
             let name = p.file_name().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
+            let key = normalize(&name);
             let mut roots = ROOTS.lock().unwrap_or_else(|e| e.into_inner());
-            roots.retain(|(n, _)| n != &name);
-            roots.push((name.clone(), p.to_path_buf()));
-            return name;
+            roots.retain(|(n, _)| normalize(n) != key);
+            roots.push((key.clone(), p.to_path_buf()));
+            return key;
         }
         d = p.parent();
     }
-    start.file_name().map(|s| s.to_string_lossy().into_owned()).unwrap_or_else(|| "unknown".into())
+    let raw = start
+        .file_name()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "unknown".into());
+    normalize(&raw)
 }
 
 /// Git repos `project_name` found in this run, by project name, so `evidence::note` can
@@ -692,23 +665,6 @@ pub(crate) fn claude_settings() -> PathBuf {
     home().join(".claude").join("settings.json")
 }
 
-/// The hooks to install for the Claude Code on this computer.
-fn hook_events() -> Vec<&'static str> {
-    hooks_for(crate::claude::newest_version(&home().join(".claude").join("projects")))
-}
-
-/// The hooks a Claude Code of this version knows. With no version to go by (no session
-/// logs yet, so most likely a new install), all of them.
-fn hooks_for(version: Option<(u32, u32, u32)>) -> Vec<&'static str> {
-    HOOK_EVENTS
-        .into_iter()
-        .filter(|e| match NEWER_HOOKS.iter().find(|(name, _)| name == e) {
-            Some((_, since)) => version.is_none_or(|v| v >= *since),
-            None => true,
-        })
-        .collect()
-}
-
 fn is_ours(group: &Value) -> bool {
     group
         .get("hooks")
@@ -744,7 +700,6 @@ fn setup(settings: &Path, remove: bool) -> Result<String, String> {
     let hooks = obj.entry("hooks").or_insert_with(|| json!({}));
     let hooks = hooks.as_object_mut().ok_or("\"hooks\" in settings.json isn't an object, so it wasn't changed")?;
     let mut changed = 0;
-    let wanted = hook_events();
     for event in HOOK_EVENTS {
         let groups = hooks.entry(event).or_insert_with(|| json!([]));
         let Some(groups) = groups.as_array_mut() else { continue };
@@ -752,9 +707,9 @@ fn setup(settings: &Path, remove: bool) -> Result<String, String> {
         groups.retain(|g| !is_ours(g));
         if remove {
             changed += before - groups.len();
-        } else if wanted.contains(&event) {
+        } else {
             let mut group = json!({ "hooks": [{ "type": "command", "command": command }] });
-            if TOOL_HOOKS.contains(&event) {
+            if event == "PostToolUse" {
                 group["matcher"] = "*".into();
             }
             groups.push(group);
@@ -779,28 +734,8 @@ fn setup(settings: &Path, remove: bool) -> Result<String, String> {
     Ok(if remove {
         format!("took {changed} steer hooks out of {}", settings.display())
     } else {
-        format!("added steer hooks for {} to {}", wanted.join(", "), settings.display())
+        format!("added steer hooks for {} to {}", HOOK_EVENTS.join(", "), settings.display())
     })
-}
-
-/// After an update that hooks into more of Claude Code (or once Claude Code itself is new
-/// enough for a newer hook), adds the new hooks for people who already have steer's.
-/// Leaves people who took them out alone.
-pub(crate) fn refresh_hooks() -> Option<String> {
-    let settings = claude_settings();
-    if !some_hooks_installed(&settings) || hooks_installed(&settings) {
-        return None;
-    }
-    setup(&settings, false).ok()
-}
-
-/// Whether any of steer's hooks are in Claude Code's settings.
-pub(crate) fn some_hooks_installed(settings: &Path) -> bool {
-    fs::read_to_string(settings)
-        .ok()
-        .and_then(|s| serde_json::from_str::<Value>(&s).ok())
-        .and_then(|v| v.get("hooks").and_then(Value::as_object).cloned())
-        .is_some_and(|h| h.values().filter_map(Value::as_array).any(|gs| gs.iter().any(is_ours)))
 }
 
 pub(crate) fn hooks_installed(settings: &Path) -> bool {
@@ -810,7 +745,7 @@ pub(crate) fn hooks_installed(settings: &Path) -> bool {
         .and_then(|v| v.get("hooks").cloned())
         .and_then(|h| h.as_object().cloned())
         .is_some_and(|h| {
-            hook_events()
+            HOOK_EVENTS
                 .iter()
                 .all(|e| h.get(*e).and_then(Value::as_array).is_some_and(|gs| gs.iter().any(is_ours)))
         })
@@ -925,7 +860,7 @@ fn submit(args: &[String]) -> Result<String, String> {
                 it.next();
             }
             a if a.starts_with("--") => return Err(format!("unknown option {a}")),
-            a => named = Some(a.to_owned()),
+            a => named = Some(normalize(a)),
         }
     }
     let here = project_name(&cwd);
@@ -1170,59 +1105,6 @@ pub(crate) fn use_temp_home() {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn newer_hooks_only_for_a_claude_code_that_knows_them() {
-        assert_eq!(hooks_for(None).len(), HOOK_EVENTS.len(), "no logs yet: a new install, so all of them");
-        assert_eq!(hooks_for(Some((2, 1, 330))).len(), HOOK_EVENTS.len());
-        let old = hooks_for(Some((1, 0, 120)));
-        assert!(old.contains(&"UserPromptSubmit") && old.contains(&"PostToolUse") && old.contains(&"Stop"));
-        assert!(!old.contains(&"PermissionRequest") && !old.contains(&"PostToolUseFailure"));
-        let middle = hooks_for(Some((2, 1, 50)));
-        assert!(middle.contains(&"PermissionRequest") && !middle.contains(&"PostToolUseFailure"));
-        assert_eq!(crate::claude::parse_version("2.1.330"), Some((2, 1, 330)));
-        assert_eq!(crate::claude::parse_version("2.1"), None);
-    }
-
-    #[test]
-    fn claude_code_hooks_become_events() {
-        use_temp_home();
-        let base = |name: &str| json!({ "session_id": "s1", "cwd": "/tmp/steer-test-proj", "hook_event_name": name, "permission_mode": "default" });
-        let with = |name: &str, extra: Value| {
-            let mut v = base(name);
-            for (k, x) in extra.as_object().unwrap() {
-                v[k] = x.clone();
-            }
-            claude_event(&v)
-        };
-
-        // A permission prompt: when it showed, and nothing about the tool.
-        let wait = with("PermissionRequest", json!({ "tool_name": "Bash", "tool_input": { "command": "rm -rf build" } })).unwrap();
-        assert_eq!(wait["kind"], "wait");
-        assert_eq!(wait["reason"], "permission");
-        assert!(!wait.to_string().contains("rm -rf"), "the command never leaves the computer");
-
-        // A tool's run time, so its start is known.
-        let tool = with("PostToolUse", json!({ "tool_name": "Bash", "tool_input": {}, "tool_response": {}, "duration_ms": 1234 })).unwrap();
-        assert_eq!(tool["kind"], "tool");
-        assert_eq!(tool["ms"], 1234);
-        let old = with("PostToolUse", json!({ "tool_name": "Edit" })).unwrap();
-        assert!(old.get("ms").is_none(), "older Claude Code without durations still works");
-
-        // Stopping a tool is an interrupt; a tool that failed on its own is just a tool.
-        assert_eq!(with("PostToolUseFailure", json!({ "tool_name": "Bash", "error": "x", "is_interrupt": true })).unwrap()["kind"], "interrupt");
-        assert_eq!(with("PostToolUseFailure", json!({ "tool_name": "Bash", "error": "x", "duration_ms": 50 })).unwrap()["ms"], 50);
-
-        // Prompts carry the permission mode, if it's one steer knows.
-        let prompt = with("UserPromptSubmit", json!({ "prompt": "the jump in player.rs is floaty" })).unwrap();
-        assert_eq!(prompt["mode"], "default");
-        let mut odd = base("UserPromptSubmit");
-        odd["prompt"] = "fix it".into();
-        odd["permission_mode"] = "something new".into();
-        assert!(claude_event(&odd).unwrap().get("mode").is_none());
-
-        assert!(with("Notification", json!({ "message": "Claude needs your permission" })).is_none());
-    }
 
     #[test]
     fn github_remotes_become_links() {

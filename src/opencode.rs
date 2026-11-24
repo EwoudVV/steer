@@ -126,7 +126,9 @@ pub fn parse(id: &str, session: &str, project: &str, kind: &str, d: &Value, is_s
                 .map(|f| f.iter().filter(|f| f.get("mime").and_then(Value::as_str).is_some_and(|m| m.starts_with("image/"))).count())
                 .unwrap_or(0);
             if !text.trim().is_empty() || images > 0 {
-                out.push(prompt_event(format!("oc-{id}"), session, project, VIA, t, &PromptInfo::analyze(text.trim(), images)));
+                let model = d.get("model").and_then(Value::as_str);
+                let tokens = d.get("tokens").and_then(Value::as_u64).or_else(|| d.pointer("/usage/output_tokens").and_then(Value::as_u64));
+                out.push(prompt_event(format!("oc-{id}"), session, project, VIA, t, &PromptInfo::analyze_with(text.trim(), images, model, tokens)));
             }
         }
         "assistant" => {
@@ -137,7 +139,9 @@ pub fn parse(id: &str, session: &str, project: &str, kind: &str, d: &Value, is_s
                 let Some(t) = ms(item.pointer("/time/created")) else { continue };
                 let tool_id = item.get("id").and_then(Value::as_str).unwrap_or_default();
                 let name = item.get("name").and_then(Value::as_str).unwrap_or("tool");
-                out.push(tool_event(format!("oc-{id}-{tool_id}"), session, project, VIA, t, name));
+                let model = item.get("model").and_then(Value::as_str);
+                let tokens = item.get("tokens").and_then(Value::as_u64).or_else(|| item.pointer("/usage/output_tokens").and_then(Value::as_u64));
+                out.push(tool_event(format!("oc-{id}-{tool_id}"), session, project, VIA, t, name, model, tokens));
             }
             if let Some(t) = ms(d.pointer("/time/completed")) {
                 out.push(event(format!("oc-{id}-done"), session, project, VIA, t, "stop"));

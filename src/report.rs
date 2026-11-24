@@ -239,13 +239,24 @@ fn render_turn(h: &mut String, t: &Turn, start_day: NaiveDate) {
         .filter(|(_, n)| **n > 0)
         .map(|(g, n)| plural(*n, g))
         .collect();
+    let model = t.model.as_deref().map(str::trim).filter(|s| !s.is_empty());
+    let agent_did = if model.is_some() {
+        let m = model.unwrap();
+        if !did.is_empty() {
+            format!("{}, {}", did.join(", "), m)
+        } else {
+            m.to_string()
+        }
+    } else {
+        did.join(", ")
+    };
 
     let _ = write!(
         h,
         "<tr{row}><td>{when}</td><td>{action}</td><td title=\"{more}\">{notes}</td><td class=\"r\">{you}</td><td class=\"r\">{agent}</td><td>{did}</td></tr>\n",
         row = if t.dark_flow { " class=\"flow\"" } else { "" },
         more = esc(&more),
-        did = did.join(", "),
+        did = esc(&agent_did),
     );
 }
 
@@ -528,10 +539,10 @@ mod tests {
         DateTime::from_timestamp(1_800_000_000 + secs, 0).unwrap()
     }
     fn prompt(secs: i64, text: &str) -> Event {
-        Event { id: None, t: at(secs), kind: EventKind::Prompt(PromptInfo::analyze(text, 0)) }
+        Event { id: None, t: at(secs), kind: EventKind::Prompt(PromptInfo::analyze(text, 0)), model: None, tokens: None }
     }
     fn agent(secs: i64) -> Event {
-        Event { id: None, t: at(secs), kind: EventKind::Agent { tools: vec!["Edit".into()] } }
+        Event { id: None, t: at(secs), kind: EventKind::Agent { tools: vec!["Edit".into()] }, model: None, tokens: None }
     }
     fn notes(events: Vec<Event>) -> Vec<String> {
         let r = analyze(&Session { cwd: None, title: None, events }, &[]);

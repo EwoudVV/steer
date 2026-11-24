@@ -84,7 +84,9 @@ pub fn parse(v: &Value, session: &str, project: &str, line_offset: u64) -> Optio
         }
         "response_item" if kind.ends_with("call") => {
             let name = p.get("name").and_then(Value::as_str).unwrap_or(kind);
-            Some(tool_event(id, session, project, VIA, t, name))
+            let model = p.get("model").and_then(Value::as_str);
+            let tokens = p.get("usage").and_then(|u| u.get("output_tokens")).and_then(Value::as_u64);
+            Some(tool_event(id, session, project, VIA, t, name, model, tokens))
         }
         "event_msg" if kind == "task_complete" => Some(event(id, session, project, VIA, t, "stop")),
         "event_msg" if kind == "turn_aborted" => Some(event(id, session, project, VIA, t, "interrupt")),

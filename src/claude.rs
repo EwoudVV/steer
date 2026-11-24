@@ -115,7 +115,9 @@ fn assistant_event(v: &Value, t: DateTime<Utc>) -> Option<Event> {
                 .collect()
         })
         .unwrap_or_default();
-    Some(Event { id: None, t, kind: EventKind::Agent { tools } })
+    let model = str_field(v, "model");
+    let tokens = usage_tokens(v);
+    Some(Event { id: None, t, kind: EventKind::Agent { tools }, model, tokens })
 }
 
 fn user_event(v: &Value, t: DateTime<Utc>) -> Option<Event> {
@@ -137,7 +139,7 @@ fn user_event(v: &Value, t: DateTime<Utc>) -> Option<Event> {
             } else {
                 EventKind::Agent { tools: Vec::new() }
             };
-            return Some(Event { id: None, t, kind });
+            return Some(Event { id: None, t, kind, model: None, tokens: None });
         }
     }
 
@@ -176,7 +178,7 @@ fn user_event(v: &Value, t: DateTime<Utc>) -> Option<Event> {
     } else {
         EventKind::Prompt(PromptInfo::analyze(text, images))
     };
-    Some(Event { id: None, t, kind })
+    Some(Event { id: None, t, kind, model: None, tokens: None })
 }
 
 /// Text Claude Code puts in a user message itself, never typed by the person.
@@ -284,6 +286,19 @@ fn str_field(v: &Value, key: &str) -> Option<String> {
 fn timestamp(v: &Value) -> Option<DateTime<Utc>> {
     let s = v.get("timestamp").and_then(Value::as_str)?;
     DateTime::parse_from_rfc3339(s).ok().map(|d| d.with_timezone(&Utc))
+}
+
+/// Total tokens (input + output) from a message's usage block.
+fn usage_tokens(v: &Value) -> Option<u64> {
+    let usage = v.pointer("/message/usage").or_else(|| v.pointer("/usage"))?;
+    let out = usage.get("output_tokens").and_then(Value::as_u64);
+    let input = usage.get("input_tokens").and_then(Value::as_u64);
+    match (input, out) {
+        (Some(i), Some(o)) => Some(i + o),
+        (_, Some(o)) => Some(o),
+        (Some(i), None) => Some(i),
+        _ => None,
+    }
 }
 
 #[cfg(test)]

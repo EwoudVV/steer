@@ -14,6 +14,10 @@ pub struct PromptInfo {
     pub observation: bool,
     /// Short, generic prompts like "continue" or "fix it".
     pub generic: bool,
+    /// The model that answered (or was asked), if the tool's log says.
+    pub model: Option<String>,
+    /// Tokens spent on this turn, if the tool's log says.
+    pub tokens: Option<u64>,
     word_hashes: HashSet<u64>,
 }
 
@@ -33,6 +37,11 @@ const OBSERVATION: &[&str] = &[
 
 impl PromptInfo {
     pub fn analyze(text: &str, images: usize) -> Self {
+        Self::analyze_with(text, images, None, None)
+    }
+
+    /// Like `analyze`, plus which model ran it and how many tokens the turn spent.
+    pub fn analyze_with(text: &str, images: usize, model: Option<String>, tokens: Option<u64>) -> Self {
         let typed = typed_part(text);
         let typed_words = typed.split_whitespace().count();
         let lower = text.to_lowercase();
@@ -63,6 +72,8 @@ impl PromptInfo {
             specific: specific.min(typed_words as u32 + 2),
             observation,
             generic,
+            model,
+            tokens,
             word_hashes: norm_words.iter().filter(|w| w.len() > 2).map(|w| hash(w)).collect(),
         }
     }

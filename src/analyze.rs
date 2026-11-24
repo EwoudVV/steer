@@ -98,6 +98,10 @@ pub struct Turn {
     /// Time that another session running at the same moment already counted, so it
     /// isn't counted again here. Set by `count_overlap_once`.
     pub overlap_secs: i64,
+    /// Which model ran the agent, and how many tokens it used (input + output).
+    pub model: Option<String>,
+    /// Tokens used by the agent turn, input + output. 0 if unknown.
+    pub tokens: u64,
 }
 
 pub struct SessionReport {
@@ -125,10 +129,12 @@ struct Segment {
     agent_secs: i64,
     last_agent: Option<DateTime<Utc>>,
     tools: [usize; 7],
+    last_model: Option<&'static str>,
+    tokens: u64,
 }
 
 fn segment(events: &[Event], start: DateTime<Utc>) -> Segment {
-    let mut seg = Segment { agent_secs: 0, last_agent: None, tools: [0; 7] };
+    let mut seg = Segment { agent_secs: 0, last_agent: None, tools: [0; 7], last_model: None, tokens: 0 };
     let mut prev = start;
     for e in events {
         if let EventKind::Agent { tools } = &e.kind {
@@ -138,6 +144,8 @@ fn segment(events: &[Event], start: DateTime<Utc>) -> Segment {
             }
             prev = e.t;
             seg.last_agent = Some(e.t);
+            seg.last_model = e.model.as_deref();
+            seg.tokens = e.tokens.unwrap_or(0);
             for name in tools {
                 seg.tools[tool_group(name)] += 1;
             }
@@ -303,6 +311,8 @@ pub fn analyze(session: &Session, commits: &[DateTime<Utc>]) -> SessionReport {
             typed,
             run: 0,
             overlap_secs: 0,
+            model: segments[k].last_model.clone().map(str::to_string),
+            tokens: segments[k].tokens,
         });
         loopy.push(is_loopy);
         typing.push(typed);
@@ -403,10 +413,10 @@ mod tests {
         DateTime::from_timestamp(1_800_000_000 + min * 60 + sec, 0).unwrap()
     }
     fn prompt(t: DateTime<Utc>, text: &str) -> Event {
-        Event { id: None, t, kind: EventKind::Prompt(PromptInfo::analyze(text, 0)) }
+        Event { id: None, t, kind: EventKind::Prompt(PromptInfo::analyze(text, 0)), model: None, tokens: None }
     }
     fn agent(t: DateTime<Utc>) -> Event {
-        Event { id: None, t, kind: EventKind::Agent { tools: vec!["Edit".into()] } }
+        Event { id: None, t, kind: EventKind::Agent { tools: vec!["Edit".into()] }, model: None, tokens: None }
     }
     fn run(events: Vec<Event>) -> SessionReport {
         analyze(&Session { cwd: None, title: None, events }, &[])

@@ -88,12 +88,16 @@ pub fn parse(v: &Value, session: &str, project: &str, line_offset: u64) -> Optio
                 .and_then(Value::as_array)
                 .map(|a| a.iter().filter(|a| is_image(a)).count())
                 .unwrap_or(0);
+            let model = d.get("model").and_then(Value::as_str);
+            let tokens = d.get("usage").and_then(|u| u.get("output_tokens")).and_then(Value::as_u64);
             (!text.trim().is_empty() || images > 0)
-                .then(|| prompt_event(id, session, project, VIA, t, &PromptInfo::analyze(text.trim(), images)))
+                .then(|| prompt_event(id, session, project, VIA, t, &PromptInfo::analyze_with(text.trim(), images, model, tokens)))
         }
         "tool.execution_start" => {
             let name = ["toolName", "name", "tool"].iter().find_map(|k| d.get(*k).and_then(Value::as_str)).unwrap_or("tool");
-            Some(tool_event(id, session, project, VIA, t, name))
+            let model = d.get("model").and_then(Value::as_str);
+            let tokens = d.get("usage").and_then(|u| u.get("output_tokens")).and_then(Value::as_u64);
+            Some(tool_event(id, session, project, VIA, t, name, model, tokens))
         }
         "assistant.turn_end" => Some(event(id, session, project, VIA, t, "stop")),
         kind if kind.contains("abort") => Some(event(id, session, project, VIA, t, "interrupt")),

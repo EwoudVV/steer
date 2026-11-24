@@ -297,14 +297,14 @@ try {
     const started = await onHost("steer.dino.icu", "/api/cli-login", "POST");
     assert.match(JSON.parse(started.body).url, /^https:\/\/steer\.dino\.icu\/login\?code=/, "the login link stays on that address");
     const script = (await onHost("steer.dino.icu", "/install.sh")).body;
-    assert.match(script, /export STEER_SERVER=https:\/\/steer\.dino\.icu\n/, "and so does the account the install makes");
+    assert.match(script, /export STEER_SERVER=https:\/\/steer\.dino\.icu\r?\n/, "and so does the account the install makes");
     assert.ok(!script.includes("hackclub.app"), "nothing in it points at the main address");
     assert.match((await onHost("steer.dino.icu", "/install.ps1")).body, /\$env:STEER_SERVER = "https:\/\/steer\.dino\.icu"/);
     assert.match((await onHost("steer.dino.icu", "/")).body, /curl -fsSL https:\/\/steer\.dino\.icu\/install\.sh \| sh/);
     const reviewer = await onHost("steer.dino.icu", "/reviewer/login?r=abcdefghijkl");
     assert.equal(new URL(reviewer.headers.location).searchParams.get("redirect_uri"), "https://steer.dino.icu/auth/callback");
     // The main address and any other host are untouched.
-    assert.match(await (await fetch(`${STEER}/install.sh`)).text(), /export STEER_SERVER=https:\/\/steer\.duck\.hackclub\.app\n/);
+    assert.match(await (await fetch(`${STEER}/install.sh`)).text(), /export STEER_SERVER=https:\/\/steer\.duck\.hackclub\.app\r?\n/);
     const other = await onHost("evil.example", "/api/cli-login", "POST");
     assert.ok(JSON.parse(other.body).url.startsWith(`${STEER}/login?code=`), "a made-up Host header gets the main address");
   }

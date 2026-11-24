@@ -45,3 +45,11 @@ a.button:hover{background:#000;color:#fff}
 .cmd pre{flex:1;margin:0;min-width:0}
 button.link{border:0;padding:0;background:none;color:#000;text-decoration:underline}
 button.link:hover{background:none;color:#000}
+h1 .top{float:right;font-size:14px;font-weight:normal;margin-top:5px}
+.strip.big{height:26px;margin:16px 0 6px}
+img.badge{vertical-align:middle}
+ol.steps{padding-left:22px}
+ol.steps li{margin:14px 0}
+ol.steps li p{margin:4px 0}
+.foot{margin-top:32px;padding-top:8px;border-top:1px solid #000}
+.field{border:1px solid #000;border-radius:0;padding:3px 6px}

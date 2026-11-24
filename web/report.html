@@ -1,0 +1,41 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'none'; form-action 'none'; base-uri 'none'">
+<title>steer · old claude code logs</title>
+<link rel="stylesheet" href="style.css">
+<script type="module" src="report.js"></script>
+</head>
+<body>
+<main>
+<h1><a href="/">steer</a> / your old Claude Code logs</h1>
+<p>Claude Code keeps a log of every session, so steer can work out the time you already spent from those, without installing anything. It only knows what's in the logs, so it misses testing and coding by hand that live tracking would catch.</p>
+<p>The logs are in a hidden folder:</p>
+<ul>
+<li>Mac and Linux: <code>~/.claude/projects</code></li>
+<li>Windows: <code>%USERPROFILE%\.claude\projects</code></li>
+</ul>
+<p>In the folder picker, press Cmd+Shift+G on a Mac and paste the path, or paste it into the address bar on Windows. To drag it from Finder instead, press Cmd+Shift+. to show hidden folders.</p>
+
+<div id="drop">Drop the projects folder here or <button id="choose" type="button">pick it</button><input type="file" id="pick" webkitdirectory class="hidden"></div>
+<p>
+<label>Show <select id="days">
+<option value="7">last 7 days</option>
+<option value="30" selected>last 30 days</option>
+<option value="90">last 90 days</option>
+<option value="all">all time</option>
+</select></label>
+&nbsp;
+<label><input type="checkbox" id="hide"> hide session titles</label>
+&nbsp;
+<button id="save" type="button" class="hidden">Save report</button>
+</p>
+<p id="status" class="muted"></p>
+<p class="muted">Nothing gets uploaded. Your browser reads the files and does the math on your computer, and this page isn't allowed to send data anywhere (it's in the Content-Security-Policy at the top of the page source). Your browser might still say "upload", that's just what it calls picking a folder.</p>
+
+<div id="report"></div>
+</main>
+</body>
+</html>

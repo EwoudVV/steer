@@ -8,7 +8,7 @@
 // hold up the events everyone else is sending.
 
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
-import { appendFileSync, createReadStream, existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { appendFileSync, createReadStream, existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { createServer } from "node:http";
 import { dirname, join } from "node:path";
 import { createInterface } from "node:readline";
@@ -573,6 +573,7 @@ function workerMain() {
   }
 
   async function job({ op, name, version, project, from, to, info }) {
+    if (op === "forget") return void kept.delete(name); // the account was deleted
     const projects = await projectsOf(name, version);
     if (op === "checkins") {
       const answers = [];
@@ -693,6 +694,9 @@ class Lru {
 }
 
 const pages = new Lru(64 * 1024 * 1024); // key -> { version, at, value }
+// Which copy of an account's events something was worked out from. With the account's
+// creation time in it, the worker never mixes up a deleted account and a new one.
+const versionOf = (name, store) => `${users[name]?.created ?? ""}|${store.counted}`;
 const working = new Map(); // key -> promise
 
 /**
@@ -701,14 +705,18 @@ const working = new Map(); // key -> promise
  * older one is shown.
  */
 function cached(key, name, store, msg, sizeOf) {
+  // The account's creation time goes in the key too, so pages of a deleted account never
+  // show up for a new account that gets the same name.
+  const born = users[name]?.created ?? "";
+  key += `\n${born}`;
+  const version = versionOf(name, store);
   const hit = pages.get(key);
-  if (hit && (hit.version === store.counted || Date.now() - hit.at < REPORT_EVERY)) return Promise.resolve(hit.value);
+  if (hit && (hit.version === version || Date.now() - hit.at < REPORT_EVERY)) return Promise.resolve(hit.value);
   let p = working.get(key);
   if (!p) {
-    const version = store.counted;
     p = work({ ...msg, name, version })
       .then((value) => {
-        pages.set(key, { version, at: Date.now(), value }, sizeOf(value) + key.length + 64);
+        if ((users[name]?.created ?? "") === born) pages.set(key, { version, at: Date.now(), value }, sizeOf(value) + key.length + 64);
         return value;
       })
       .finally(() => working.delete(key));
@@ -784,7 +792,9 @@ function accuracyHtml() {
 
 const STATIC = {
   "/": ["index.html", "text/html; charset=utf-8"],
-  "/app.js": ["app.js", "text/javascript; charset=utf-8"],
+  "/copy.js": ["copy.js", "text/javascript; charset=utf-8"],
+  "/report": ["report.html", "text/html; charset=utf-8"],
+  "/report.js": ["report.js", "text/javascript; charset=utf-8"],
   "/steer.js": ["steer.js", "text/javascript; charset=utf-8"],
   "/style.css": ["style.css", "text/css; charset=utf-8"],
   "/trust": ["trust.html", "text/html; charset=utf-8"],
@@ -806,7 +816,7 @@ const json = (res, status, obj, extra) => send(res, status, JSON.stringify(obj),
 const tooMany = (res, secs, error) => json(res, 429, { error }, { "retry-after": String(secs) });
 const esc = (s) => String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
 
-function page(res, title, body, { refresh, status = 200, csp = PAGE_CSP } = {}) {
+function page(res, title, body, { refresh, status = 200, csp = PAGE_CSP, headers = {}, script } = {}) {
   const html = `<!doctype html>
 <html lang="en">
 <head>
@@ -814,7 +824,7 @@ function page(res, title, body, { refresh, status = 200, csp = PAGE_CSP } = {}) 
 <meta name="viewport" content="width=device-width, initial-scale=1">
 ${refresh ? `<meta http-equiv="refresh" content="${refresh}">\n` : ""}<title>${esc(title)}</title>
 <link rel="stylesheet" href="/style.css">
-</head>
+${script ? `<script type="module" src="${script}"></script>\n` : ""}</head>
 <body>
 <main>
 ${body}
@@ -822,8 +832,13 @@ ${body}
 </body>
 </html>
 `;
-  send(res, status, html, "text/html; charset=utf-8", { "content-security-policy": csp });
+  send(res, status, html, "text/html; charset=utf-8", { "content-security-policy": csp, ...headers });
 }
+
+const redirect = (res, location, headers = {}) => {
+  res.writeHead(303, { location, ...headers });
+  res.end();
+};
 
 const TOO_BIG = Symbol("too big");
 
@@ -918,7 +933,7 @@ async function projectPage(res, name, project) {
   const pr = encodeURIComponent(project);
   const badgeLine = `[![steered with ai](${PUBLIC_URL}/badge/${u}/${pr}.svg)](${PUBLIC_URL}/u/${u}/${pr})`;
   const body = `<h1><a href="/u/${u}">${esc(name)}</a> / ${esc(project)}</h1>
-<p class="muted">Tracked from ${esc(tools.join(", "))}. To freeze these hours into a page for a reviewer, run <code>steer submit</code> in the project's folder.</p>
+<p class="muted">Tracked from ${esc(tools.join(", "))}. To freeze these hours into a page for a reviewer, submit the project from <a href="/me">your steer</a>, or run <code>steer submit</code> in its folder.</p>
 <p><img src="/badge/${u}/${pr}.svg" alt="steered with ai"> <span class="muted">for your README, it updates by itself:</span> <code>${esc(badgeLine)}</code></p>
 ${html}`;
   page(res, `${project} · steer`, body);
@@ -981,41 +996,38 @@ async function hoursJson(res, name, project) {
 // page with its own link. A reviewer opens that link instead of the live page, so the
 // hours they check can't change after the project was submitted.
 
-async function submitReview(req, res) {
-  const name = userFromKey(req);
-  if (!name) return json(res, 401, { error: "that key isn't signed in, run steer login" });
-  if (!submits.has(name)) return tooMany(res, submits.wait(name), "too many review pages at once, try again in a few minutes");
-  const body = await readJson(req, 10_000);
-  if (body === TOO_BIG) return tooLarge(req, res);
-  const project = typeof body?.project === "string" ? body.project : "";
-  if (!project || project.length > 100) return json(res, 400, { error: "say which project" });
-  const from = body.from ?? null;
-  const to = body.to ?? null;
+/**
+ * Freezes a project's hours into a review page. `steer submit` and the submit form on
+ * /me both end up here. Returns { review }, or { status, error } to show the person.
+ */
+async function makeReview(name, { project, from = null, to = null, repo = null }) {
+  if (typeof project !== "string" || !project || project.length > 100) return { status: 400, error: "say which project" };
   for (const d of [from, to]) {
     if (d !== null && (typeof d !== "string" || !DAY.test(d) || Number.isNaN(Date.parse(`${d}T00:00:00Z`)))) {
-      return json(res, 400, { error: "days look like 2026-11-21" });
+      return { status: 400, error: "days look like 2026-11-21" };
     }
   }
-  if (from && to && from > to) return json(res, 400, { error: "the first day is after the last one" });
-  if (body.repo != null && (typeof body.repo !== "string" || !GITHUB_REPO.test(body.repo) || /\/\.{1,2}(\/|$)/.test(body.repo))) {
-    return json(res, 400, { error: "the repo should look like https://github.com/you/project" });
+  if (from && to && from > to) return { status: 400, error: "the first day is after the last one" };
+  if (repo !== null && (typeof repo !== "string" || !GITHUB_REPO.test(repo) || /\/\.{1,2}(\/|$)/.test(repo))) {
+    return { status: 400, error: "the repo should look like https://github.com/you/project" };
   }
-  const repo = body.repo ?? null;
-  submits.take(name);
+  if (!submits.take(name)) return { status: 429, error: "too many review pages at once, try again in a few minutes", wait: submits.wait(name) };
 
   const store = await storeOf(name);
+  const version = versionOf(name, store);
   const id = randomBytes(9).toString("base64url");
   const hc = users[name].hc ?? null;
   const frozen = new Date().toISOString();
   const url = `${PUBLIC_URL}/r/${id}`;
   const info = { name, slack: hc?.slack_id ?? null, verified: hc?.verification_status === "verified", from, to, frozen, url, repo, checks: null };
   if (repo && store.counted) {
-    const commits = await work({ op: "commits", name, version: store.counted, project, from, to });
+    const commits = await work({ op: "commits", name, version, project, from, to });
     if (commits.length) info.checks = await checkCommits(repo, commits, name);
   }
-  const r = store.counted ? await work({ op: "review", name, version: store.counted, project, from, to, info }) : null;
-  if (!r) return json(res, 404, { error: `nothing tracked in a project called ${project}` });
-  if (r.empty) return json(res, 404, { error: `nothing tracked in ${project} in those days` });
+  const r = store.counted ? await work({ op: "review", name, version, project, from, to, info }) : null;
+  if (!r) return { status: 404, error: `nothing tracked in a project called ${project}` };
+  if (r.empty) return { status: 404, error: `nothing tracked in ${project} in those days` };
+  if (!hasUser(name)) return { status: 410, error: "this account was just deleted" };
   const review = {
     id,
     user: name,
@@ -1040,7 +1052,19 @@ async function submitReview(req, res) {
   writeFileSync(reviewFile(id), JSON.stringify(review), { flag: "wx" });
   users[name].reviews = [...(users[name].reviews ?? []), { id, project: review.project, hours: r.hours, frozen }].slice(-500);
   saveUsers();
-  json(res, 201, { id, url, hours: r.hours, your_time: fmtDur(r.secs), line: r.line });
+  return { review };
+}
+
+async function submitReview(req, res) {
+  const name = userFromKey(req);
+  if (!name) return json(res, 401, { error: "that key isn't signed in, run steer login" });
+  if (!submits.has(name)) return tooMany(res, submits.wait(name), "too many review pages at once, try again in a few minutes");
+  const body = await readJson(req, 10_000);
+  if (body === TOO_BIG) return tooLarge(req, res);
+  const made = await makeReview(name, { project: body?.project, from: body?.from ?? null, to: body?.to ?? null, repo: body?.repo ?? null });
+  if (made.error) return made.wait ? tooMany(res, made.wait, made.error) : json(res, made.status, { error: made.error });
+  const r = made.review;
+  json(res, 201, { id: r.id, url: r.url, hours: r.hours, your_time: fmtDur(r.secs), line: r.line });
 }
 
 /**
@@ -1098,55 +1122,123 @@ function reviewedHours(r, decisions) {
   return last.action === "reject" ? "0.0" : last.action === "cut" ? last.hours : r.hours;
 }
 
+// ----- signing in on the website -----
+// One Hack Club sign-in for everyone. People see their own projects on /me, and
+// reviewers (STEER_REVIEWERS) can also approve, cut or reject review pages. Sessions
+// only live in memory, so a restart signs everyone out.
+
 const SESSION_TTL = 12 * 60 * 60 * 1000;
-const sessions = new Map(); // cookie token -> { slack, name, csrf, until }
-const reviewerStates = new Map(); // oauth state -> { review, created }
+const sessions = new Map(); // cookie token -> { token, sub, slack, name, csrf, until }
+const signIns = new Map(); // oauth state -> { back, browser, created }
+
+/** A cookie's value, or "". */
+function cookieOf(req, name) {
+  const m = new RegExp(`(?:^|;\\s*)${name}=([A-Za-z0-9_-]{10,64})`).exec(req.headers.cookie ?? "");
+  return m ? m[1] : "";
+}
+
+/** Compares two secrets without giving away how much of them matched. */
+function sameSecret(a, b) {
+  const x = Buffer.from(String(a ?? ""));
+  const y = Buffer.from(String(b ?? ""));
+  return x.length > 0 && x.length === y.length && timingSafeEqual(x, y);
+}
+
+const secureFor = (base) => (base.startsWith("https://") ? "; Secure" : "");
+
+function sessionOf(req) {
+  const s = sessions.get(cookieOf(req, "steer_session"));
+  return s && s.until > Date.now() ? s : null;
+}
 
 function reviewerOf(req) {
-  const m = /(?:^|;\s*)steer_rv=([A-Za-z0-9_-]{20,64})/.exec(req.headers.cookie ?? "");
-  const s = m && sessions.get(m[1]);
-  if (!s || s.until < Date.now() || !REVIEWERS.has(s.slack)) return null;
-  return s;
+  const s = sessionOf(req);
+  return s && REVIEWERS.has(s.slack) ? s : null;
 }
 
-function reviewerLogin(req, res, review) {
-  if (!HCA) return page(res, "steer", "<h1>steer</h1>\n<p>This server doesn't have Hack Club login set up.</p>", { status: 503 });
-  if (!REVIEW_ID.test(review)) return send(res, 400, "Bad review page");
-  const ip = clientIp(req);
-  if (!loginStarts.take(ip)) return page(res, "steer", "<h1>steer</h1>\n<p>Too many logins from here, wait a few minutes.</p>", { status: 429 });
-  if (reviewerStates.size >= LOGINS_MAX) return page(res, "steer", "<h1>steer</h1>\n<p>Too many logins right now, try again in a few minutes.</p>", { status: 503 });
-  const state = randomBytes(16).toString("base64url");
-  reviewerStates.set(state, { review, created: Date.now() });
-  const q = new URLSearchParams({ client_id: HCA.id, redirect_uri: `${baseFor(req)}/auth/callback`, response_type: "code", scope: HCA_SCOPES, state });
-  res.writeHead(303, { location: `${HCA_BASE}/oauth/authorize?${q}` });
-  res.end();
-}
+/** The steer account linked to a Hack Club account, or null. */
+const accountOf = (sub) => Object.keys(users).find((n) => users[n].hc?.sub === sub) ?? null;
 
-async function reviewerCallback(req, res, authCode, state) {
-  const { review } = reviewerStates.get(state);
-  reviewerStates.delete(state);
-  const info = authCode ? await hcaUser(authCode, `${baseFor(req)}/auth/callback`) : null;
-  if (!info?.slack_id) return page(res, "steer", "<h1>steer</h1>\n<p>Hack Club didn't confirm the login, try again.</p>");
-  if (!REVIEWERS.has(info.slack_id)) {
-    return page(
-      res,
-      "steer",
-      `<h1>Not a reviewer</h1>\n<p>Your Hack Club account (${esc(info.slack_id)}) isn't on this server's list of reviewers. Fraud squad and program reviewers get added on request.</p>\n<p><a href="/r/${review}">Back to the review page</a></p>`,
-    );
-  }
+/** Only what programs need to match hours to people. No email, name or address. */
+const hcFields = (info) => ({
+  sub: info.sub,
+  slack_id: info.slack_id ?? null,
+  verification_status: info.verification_status ?? null,
+  ysws_eligible: info.ysws_eligible ?? null,
+  updated: new Date().toISOString(),
+});
+
+/** Signs this browser in as whoever Hack Club said it is. Returns the cookie to set. */
+function startSession(req, info) {
   const token = randomBytes(24).toString("base64url");
+  const slack = typeof info.slack_id === "string" ? info.slack_id : null;
   sessions.set(token, {
-    slack: info.slack_id,
-    name: String(info.nickname || info.name || info.slack_id).slice(0, 60),
+    token,
+    sub: String(info.sub),
+    slack,
+    name: String(info.nickname || info.name || slack || "you").slice(0, 60),
     csrf: randomBytes(16).toString("base64url"),
     until: Date.now() + SESSION_TTL,
   });
-  const secure = PUBLIC_URL.startsWith("https://") ? "; Secure" : "";
-  res.writeHead(303, {
-    location: `/r/${review}`,
-    "set-cookie": `steer_rv=${token}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${SESSION_TTL / 1000}${secure}`,
+  return `steer_session=${token}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${SESSION_TTL / 1000}${secureFor(baseFor(req))}`;
+}
+
+const endSession = (req) => `steer_session=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0${secureFor(baseFor(req))}`;
+
+/** Sends someone to Hack Club to sign in, and back to `back`, a path on this site. */
+function signIn(req, res, back) {
+  if (!HCA) return page(res, "steer", "<h1>steer</h1>\n<p>This server doesn't have Hack Club login set up.</p>", { status: 503 });
+  const ip = clientIp(req);
+  if (!loginStarts.take(ip)) return page(res, "steer", "<h1>steer</h1>\n<p>Too many logins from here, wait a few minutes.</p>", { status: 429 });
+  if (signIns.size >= LOGINS_MAX) return page(res, "steer", "<h1>steer</h1>\n<p>Too many logins right now, try again in a few minutes.</p>", { status: 503 });
+  const state = randomBytes(16).toString("base64url");
+  // The sign-in has to come back to this same browser. Otherwise someone could finish a
+  // sign-in of their own in someone else's browser by sending them the link.
+  const browser = randomBytes(18).toString("base64url");
+  signIns.set(state, { back, browser, created: Date.now() });
+  const base = baseFor(req);
+  const q = new URLSearchParams({ client_id: HCA.id, redirect_uri: `${base}/auth/callback`, response_type: "code", scope: HCA_SCOPES, state });
+  redirect(res, `${HCA_BASE}/oauth/authorize?${q}`, {
+    "set-cookie": `steer_signin=${browser}; Path=/auth; HttpOnly; SameSite=Lax; Max-Age=${LOGIN_TTL / 1000}${secureFor(base)}`,
   });
-  res.end();
+}
+
+async function signInDone(req, res, authCode, state) {
+  const { back, browser } = signIns.get(state);
+  signIns.delete(state);
+  if (!sameSecret(cookieOf(req, "steer_signin"), browser)) {
+    return page(
+      res,
+      "steer",
+      `<h1>steer</h1>\n<p>This sign-in has to finish in the browser it started in. If someone sent you this link, close it. Otherwise <a href="${esc(back)}">try again</a>.</p>`,
+      { status: 403 },
+    );
+  }
+  const info = authCode ? await hcaUser(authCode, `${baseFor(req)}/auth/callback`) : null;
+  if (!info?.sub) return page(res, "steer", `<h1>steer</h1>\n<p>Hack Club didn't confirm the sign-in. <a href="${esc(back)}">Try again</a>.</p>`);
+  const slack = typeof info.slack_id === "string" ? info.slack_id : null;
+  // Whatever Hack Club says now, like a verification that went through since last time.
+  const account = accountOf(info.sub);
+  if (account) {
+    users[account].hc = hcFields(info);
+    saveUsers();
+  }
+  const cookies = [startSession(req, info), `steer_signin=; Path=/auth; HttpOnly; SameSite=Lax; Max-Age=0${secureFor(baseFor(req))}`];
+  const review = /^\/r\/([A-Za-z0-9_-]{12})$/.exec(back)?.[1];
+  if (review && !REVIEWERS.has(slack)) {
+    return page(
+      res,
+      "steer",
+      `<h1>Not a reviewer</h1>\n<p>Your Hack Club account (${esc(slack ?? "no Slack id")}) isn't on this server's list of reviewers. Fraud squad and program reviewers get added on request.</p>\n<p><a href="/r/${review}">Back to the review page</a> or <a href="/me">to your own steer</a></p>`,
+      { headers: { "set-cookie": cookies } },
+    );
+  }
+  redirect(res, back, { "set-cookie": cookies });
+}
+
+function reviewerLogin(req, res, review) {
+  if (!REVIEW_ID.test(review)) return send(res, 400, "Bad review page");
+  signIn(req, res, `/r/${review}`);
 }
 
 async function decide(req, res, id) {
@@ -1342,6 +1434,263 @@ async function slackLookup(res, slack) {
   json(res, 200, { slack_id: slack, accounts });
 }
 
+// ---------- your steer (/me) ----------
+// Signed in with Hack Club, people see their projects, submit one for review without
+// the terminal, see what reviewers decided, and can delete their account.
+
+const ME_CSP = PAGE_CSP.replace("default-src 'none';", "default-src 'none'; script-src 'self';").replace("form-action 'none'", "form-action 'self'");
+const capital = (s) => s.charAt(0).toUpperCase() + s.slice(1);
+const day = (iso) => new Date(iso).toISOString().slice(0, 10);
+
+/** The install commands for the address someone is on. /copy.js adds the copy buttons. */
+function installBox(req) {
+  const base = esc(baseFor(req));
+  return `<div id="install">
+<p data-os="unix">Mac and Linux (Terminal):</p>
+<div class="cmd" data-os="unix"><pre><code>curl -fsSL ${base}/install.sh | sh</code></pre></div>
+<p data-os="windows">Windows (PowerShell):</p>
+<div class="cmd" data-os="windows"><pre><code>irm ${base}/install.ps1 | iex</code></pre></div>
+</div>
+`;
+}
+
+/** Who's signed in, with a sign out button. */
+function meTop(s, name) {
+  const account = name ? `, steer account <a href="/u/${encodeURIComponent(name)}">${esc(name)}</a>` : "";
+  return `<form method="post" action="/me/logout"><p class="muted">Signed in with Hack Club as ${esc(s.name)}${s.slack ? ` (${esc(s.slack)})` : ""}${account}. <input type="hidden" name="csrf" value="${esc(s.csrf)}"><button class="link">Sign out</button></p></form>\n`;
+}
+
+/** What reviewers decided on a review page, last decision first. */
+function reviewStatus(id) {
+  const d = decisionsOf(id).at(-1);
+  if (!d) return `<span class="muted">not reviewed on steer yet</span>`;
+  const what = d.action === "approve" ? "approved" : d.action === "cut" ? `cut to ${esc(d.hours)}h` : `<span class="red">rejected</span>`;
+  return `${what} by ${esc(d.name)}${d.note ? `: "${esc(d.note)}"` : ""}`;
+}
+
+/** After making a review page: its link and the line to paste. */
+function madeNotice(name, id) {
+  const r = id && REVIEW_ID.test(id) ? readReview(id) : null;
+  if (!r || r.user !== name) return "";
+  return `<h2>Review page made</h2>
+<p>${esc(r.project)}, ${esc(r.hours)} hours: <a href="/r/${r.id}">${esc(r.url)}</a></p>
+<p>When you submit the project to a program, paste this into the hours field, or wherever they ask how you spent the time:</p>
+<div class="cmd"><pre><code>${esc(r.line)}</code></pre></div>
+<p class="muted">The page doesn't change after this, even if you keep working. Submit again later to get a new one.</p>
+`;
+}
+
+async function mePage(req, res, url) {
+  const s = sessionOf(req);
+  if (!s) {
+    return page(
+      res,
+      "your steer",
+      `<h1><a href="/">steer</a> / your steer</h1>
+<p>Sign in with your Hack Club account to see your projects and submit them for review.</p>
+<p><a class="button" href="/me/login">Sign in with Hack Club</a></p>
+<p class="muted">From your Hack Club account steer only keeps your Slack id and whether you're verified and eligible for YSWS. The rest is on <a href="/privacy">/privacy</a>.</p>`,
+      { csp: ME_CSP },
+    );
+  }
+  const name = accountOf(s.sub);
+  let body = `<h1><a href="/">steer</a> / your steer</h1>\n${meTop(s, name)}`;
+  if (REVIEWERS.has(s.slack)) body += `<p>You're on the reviewer list, so you can approve, cut or reject the hours on any review page.</p>\n`;
+  if (!name) {
+    body += `<p>Your Hack Club account doesn't have steer yet. Install it on the computer you code on. It asks you to sign in with Hack Club once, then your projects show up here while you work.</p>
+${installBox(req)}<p class="muted">Made a steer account before you could sign in with Hack Club? Run <code>steer login</code> on that computer once and it gets linked to this one.</p>`;
+    return page(res, "your steer", body, { csp: ME_CSP, script: "/copy.js" });
+  }
+  body += madeNotice(name, url.searchParams.get("made"));
+  const { hours } = await reportOf(name, await storeOf(name));
+  const u = encodeURIComponent(name);
+  body += `<h2>Projects</h2>\n`;
+  if (!hours.length) {
+    body += `<p>Nothing tracked yet. Once you work with an AI tool in a project it shows up here, usually within a minute. If steer isn't on this computer yet:</p>\n${installBox(req)}`;
+  } else {
+    body += `<table class="list">\n<tr><th>Project</th><th class="r">Your time</th><th class="r">Agent time</th><th class="r">Sessions</th><th></th></tr>\n`;
+    for (const p of hours) {
+      const q = encodeURIComponent(p.name);
+      body += `<tr><td><a href="/u/${u}/${q}">${esc(p.name)}</a></td><td class="r">${esc(p.your_time)}</td><td class="r">${esc(fmtDur(p.agent_secs))}</td><td class="r">${p.sessions}</td><td><a href="/me/submit?project=${q}">submit for review</a></td></tr>\n`;
+    }
+    body += `</table>\n<p class="muted">Your time is what counts: writing prompts, reading what the agent did, testing and fixing things. Agent time is when it ran by itself.</p>\n`;
+  }
+  const reviews = [...(users[name].reviews ?? [])].reverse();
+  if (reviews.length) {
+    body += `<h2>Submitted</h2>\n<table class="list">\n<tr><th>Made</th><th>Project</th><th class="r">Hours</th><th>Review</th><th>Page</th></tr>\n`;
+    for (const r of reviews) {
+      body += `<tr><td>${esc(day(r.frozen))}</td><td>${esc(r.project)}</td><td class="r">${esc(r.hours)}</td><td>${reviewStatus(r.id)}</td><td><a href="/r/${r.id}">/r/${r.id}</a></td></tr>\n`;
+    }
+    body += `</table>\n`;
+  }
+  body += `<h2>Your account</h2>
+<p>Your page at <a href="/u/${u}">${esc(new URL(baseFor(req)).host)}/u/${esc(name)}</a> is public, like a Hackatime profile. <a href="/me/delete">Delete your account</a> to take everything off the server.</p>`;
+  page(res, "your steer", body, { csp: ME_CSP, script: "/copy.js" });
+}
+
+/** The signed-in person and their steer account, or null after sending them to /me. */
+function meAccount(req, res) {
+  const s = sessionOf(req);
+  const name = s && accountOf(s.sub);
+  if (!name) {
+    redirect(res, "/me");
+    return null;
+  }
+  return { s, name };
+}
+
+/** Checks a form sent from a /me page. Returns the session and the fields, or null after answering. */
+async function meForm(req, res) {
+  const s = sessionOf(req);
+  if (!s) {
+    redirect(res, "/me");
+    return null;
+  }
+  if (!fromHere(req)) {
+    send(res, 403, "This form only works from your steer page.");
+    return null;
+  }
+  const body = await readBody(req, 10_000);
+  if (body === TOO_BIG) {
+    tooLarge(req, res);
+    return null;
+  }
+  const form = new URLSearchParams(body);
+  if (!sameSecret(form.get("csrf"), s.csrf)) {
+    send(res, 403, "This form expired, go back and reload the page.");
+    return null;
+  }
+  return { s, form };
+}
+
+/** github.com/you/project, with or without https:// or .git, as https://github.com/you/project. */
+function cleanRepo(raw) {
+  const r = String(raw ?? "").trim().replace(/\.git$/, "").replace(/\/+$/, "");
+  return r ? r.replace(/^(?:https?:\/\/)?(?:www\.)?github\.com\//i, "https://github.com/") : null;
+}
+
+/** The repo the project's last review pages had, to fill in the form. */
+function lastRepo(name, project) {
+  const mine = (users[name].reviews ?? []).filter((r) => projectKey(r.project) === projectKey(project)).slice(-5).reverse();
+  for (const r of mine) {
+    const repo = readReview(r.id)?.repo;
+    if (repo) return repo;
+  }
+  return "";
+}
+
+async function submitForm(res, s, name, project, { error, from, to, repo, status = 200 } = {}) {
+  const { hours } = await reportOf(name, await storeOf(name));
+  const p = hours.find((x) => projectKey(x.name) === projectKey(project));
+  if (!p) return page(res, "steer", `<h1>No project called ${esc(project)}</h1>\n<p><a href="/me">Back to your steer</a></p>`, { csp: ME_CSP, status: 404 });
+  repo ??= lastRepo(name, p.name);
+  page(
+    res,
+    `submit ${p.name}`,
+    `<h1><a href="/me">your steer</a> / submit ${esc(p.name)}</h1>
+<p>This freezes the project's hours into a review page with its own link, which you give the program you're submitting to. The page doesn't change after that, even if you keep working.</p>
+${error ? `<p class="red">${esc(capital(error))}.</p>\n` : ""}<form method="post" action="/me/submit">
+<input type="hidden" name="csrf" value="${esc(s.csrf)}">
+<input type="hidden" name="project" value="${esc(p.name)}">
+<p><label>GitHub repo<br><input class="field" name="repo" value="${esc(repo)}" placeholder="https://github.com/you/project" size="45" spellcheck="false"></label></p>
+<p class="muted">So the commits on the page get checked against GitHub. Leave it empty if the code isn't on GitHub.</p>
+<p>Only some days? <label>from <input class="field" type="date" name="from" value="${esc(from ?? "")}"></label> <label>to <input class="field" type="date" name="to" value="${esc(to ?? "")}"></label></p>
+<p class="muted">Leave the days empty for all of it, ${esc(p.your_time)} so far. Only pick days if part of this project was already submitted before.</p>
+<p><button>Make the review page</button> &nbsp; <a href="/me">cancel</a></p>
+</form>
+<p class="muted">It can take a few seconds, it works out all your hours and looks your commits up on GitHub.</p>`,
+    { csp: ME_CSP, status },
+  );
+}
+
+async function meSubmit(req, res) {
+  const got = await meForm(req, res);
+  if (!got) return;
+  const { s, form } = got;
+  const name = accountOf(s.sub);
+  if (!name) return redirect(res, "/me");
+  const project = form.get("project") ?? "";
+  const from = form.get("from") || null;
+  const to = form.get("to") || null;
+  const made = await makeReview(name, { project, from, to, repo: cleanRepo(form.get("repo")) });
+  if (made.error) return submitForm(res, s, name, project, { error: made.error, from, to, repo: form.get("repo") ?? "", status: made.status });
+  redirect(res, `/me?made=${made.review.id}`);
+}
+
+async function meDeletePage(res, s, name, { error, status = 200 } = {}) {
+  const store = await storeOf(name);
+  const events = store.counted + store.late;
+  const reviews = (users[name].reviews ?? []).length;
+  const what = [`the account ${name}`];
+  if (events) what.push(events === 1 ? "its 1 event" : `all ${events.toLocaleString("en-US")} of its events`);
+  if (reviews) what.push(reviews === 1 ? "its review page with what reviewers wrote on it" : `its ${reviews} review pages with what reviewers wrote on them`);
+  what.push("the link to your Hack Club account");
+  page(
+    res,
+    "delete your steer account",
+    `<h1><a href="/me">your steer</a> / delete your account</h1>
+<p>This deletes ${esc(what.slice(0, -1).join(", "))} and ${esc(what.at(-1))} from the server. ${reviews ? "Links to your review pages stop working, so a program that hasn't checked your hours yet can't anymore. " : ""}It can't be undone.</p>
+<p>steer on your computer keeps running until you run <code>steer uninstall</code>, but it can't send anything after this.</p>
+${error ? `<p class="red">${esc(error)}</p>\n` : ""}<form method="post" action="/me/delete">
+<input type="hidden" name="csrf" value="${esc(s.csrf)}">
+<p><label>Type ${esc(name)} to confirm<br><input class="field" name="confirm" autocomplete="off" spellcheck="false" required></label></p>
+<p><button>Delete everything</button> &nbsp; <a href="/me">cancel</a></p>
+</form>`,
+    { csp: ME_CSP, status },
+  );
+}
+
+async function meDelete(req, res) {
+  const got = await meForm(req, res);
+  if (!got) return;
+  const { s, form } = got;
+  const name = accountOf(s.sub);
+  if (!name) return redirect(res, "/me");
+  if ((form.get("confirm") ?? "").trim().toLowerCase() !== name) {
+    return meDeletePage(res, s, name, { error: `That doesn't match, type ${name} to delete it.`, status: 400 });
+  }
+  deleteAccount(name);
+  sessions.delete(s.token);
+  page(
+    res,
+    "deleted",
+    `<h1>Deleted</h1>\n<p>The steer account ${esc(name)} and everything in it is gone from the server.</p>\n<p>To take steer off your computer too, run <code>steer uninstall</code>.</p>\n<p><a href="/">steer</a></p>`,
+    { headers: { "set-cookie": endSession(req) } },
+  );
+}
+
+/** Takes an account off the server: the account and its keys, its events, its review
+ * pages with what reviewers decided, and what's kept in memory about it. */
+function deleteAccount(name) {
+  const u = users[name];
+  for (const h of u.keyHashes ?? []) byKey.delete(h);
+  for (const r of u.reviews ?? []) {
+    rmSync(reviewFile(r.id), { force: true });
+    rmSync(decisionsFile(r.id), { force: true });
+    reviewCache.delete(r.id);
+  }
+  rmSync(eventsFile(name), { force: true });
+  delete users[name];
+  saveUsers();
+  stores.delete(name);
+  tooBig.delete(name);
+  for (const key of [...pages.map.keys()]) if (key.split("\n")[1] === name) pages.delete(key);
+  worker?.postMessage({ id: ++lastJob, op: "forget", name });
+  const checked = checkiners ?? (existsSync(checkinersFile) ? new Set(JSON.parse(readFileSync(checkinersFile, "utf8"))) : null);
+  if (checked?.delete(name)) {
+    checkiners = checked;
+    saveCheckiners();
+    accuracyPage = null;
+  }
+}
+
+async function meLogout(req, res) {
+  const got = await meForm(req, res);
+  if (!got) return;
+  sessions.delete(got.s.token);
+  redirect(res, "/", { "set-cookie": endSession(req) });
+}
+
 // ---------- sign in with Hack Club ----------
 // The terminal asks for a login code, opens /login?code=..., and polls until the
 // browser side is done. The terminal also prints a short user code, and the page only
@@ -1499,7 +1848,7 @@ async function hcaUser(authCode, redirectUri) {
 }
 
 async function authCallback(req, res, authCode, state) {
-  if (reviewerStates.has(state)) return reviewerCallback(req, res, authCode, state);
+  if (signIns.has(state)) return signInDone(req, res, authCode, state);
   const code = byState.get(state);
   const l = code && logins.get(code);
   if (!l || !HCA || !authCode) {
@@ -1524,27 +1873,22 @@ async function authCallback(req, res, authCode, state) {
   // Same Hack Club account as before, or link the account the terminal was already
   // using, or make a new one.
   const now = new Date().toISOString();
-  let name = Object.keys(users).find((n) => users[n].hc?.sub === info.sub);
+  let name = accountOf(info.sub);
   if (!name) name = linkTarget(l);
   if (!name) {
     name = freeName(info.nickname || info.given_name || info.name);
     users[name] = { keyHashes: [], created: now };
   }
-  // Only what programs need to match hours to people. No email, name or address.
-  users[name].hc = {
-    sub: info.sub,
-    slack_id: info.slack_id ?? null,
-    verification_status: info.verification_status ?? null,
-    ysws_eligible: info.ysws_eligible ?? null,
-    updated: now,
-  };
+  users[name].hc = hcFields(info);
   l.result = { name, key: addKey(name) };
+  // This browser just proved who it is too, so it's signed in on the website as well.
   page(
     res,
     "steer login",
     `<h1>Signed in as ${esc(name)}</h1>
-<p>Go back to your terminal, it finishes by itself. You can close this tab.</p>
-<p><a href="/u/${encodeURIComponent(name)}">Your page</a></p>`,
+<p>Go back to your terminal, it finishes by itself.</p>
+<p>Your projects show up on <a href="/me">your steer</a> while you work, and that's where you submit them for review.</p>`,
+    { headers: { "set-cookie": startSession(req, info) } },
   );
 }
 
@@ -1681,6 +2025,20 @@ async function handle(req, res) {
     return authCallback(req, res, url.searchParams.get("code") ?? "", url.searchParams.get("state") ?? "");
   }
 
+  // ----- your steer -----
+  if (path.startsWith("/me")) {
+    if (req.method === "GET" && path === "/me") return mePage(req, res, url);
+    if (req.method === "GET" && path === "/me/login") return sessionOf(req) ? redirect(res, "/me") : signIn(req, res, "/me");
+    if (req.method === "POST" && path === "/me/submit") return meSubmit(req, res);
+    if (req.method === "POST" && path === "/me/delete") return meDelete(req, res);
+    if (req.method === "POST" && path === "/me/logout") return meLogout(req, res);
+    if (req.method === "GET" && (path === "/me/submit" || path === "/me/delete")) {
+      const me = meAccount(req, res);
+      if (!me) return;
+      return path === "/me/submit" ? submitForm(res, me.s, me.name, url.searchParams.get("project") ?? "") : meDeletePage(res, me.s, me.name);
+    }
+  }
+
   if (req.method === "POST" && path === "/api/events") return postEvents(req, res);
   if (req.method === "POST" && path === "/api/submit") return submitReview(req, res);
   if (req.method === "GET" && (m = /^\/r\/([^/]+)$/.exec(path)) && REVIEW_ID.test(m[1])) return reviewPage(req, res, m[1]);
@@ -1729,7 +2087,7 @@ function sweep() {
     if (store) for (const [id, got] of store.ids) if (now - got >= RECENT_IDS) store.ids.delete(id);
   }
   for (const [t, s] of sessions) if (s.until < now) sessions.delete(t);
-  for (const [k, v] of reviewerStates) if (now - v.created > LOGIN_TTL) reviewerStates.delete(k);
+  for (const [k, v] of signIns) if (now - v.created > LOGIN_TTL) signIns.delete(k);
   for (const b of [sendLimit, loginStarts, codeTries, signups, submits, exportsPerIp, lookupsPerIp, githubPerAccount]) b.sweep(now);
   for (const [name, until] of tooBig) if (until < now) tooBig.delete(name);
   for (const [name, s] of stores) if (s.store && now - s.used > STORE_IDLE) stores.delete(name);

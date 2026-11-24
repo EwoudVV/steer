@@ -96,13 +96,15 @@ steer report --days 30             # html report from your old claude code logs
 
 ## submitting a project
 
-when you ship a project, run this in its folder:
+when you ship a project, sign in at [steer.duck.hackclub.app/me](https://steer.duck.hackclub.app/me) with your hack club account and hit submit next to it. or run this in its folder:
 
 ```bash
 steer submit
 ```
 
-it freezes the project's hours into a review page with its own link, and prints a line to paste into the hours field when you submit. the page has the hours, a written justification, checks, every day and every session, and your commits linked on github, so a reviewer can check the hours without asking you anything. it never changes after that, even if you keep working. `--from 2026-11-01 --to 2026-11-21` limits it to those days.
+either way it freezes the project's hours into a review page with its own link, and gives you a line to paste into the hours field when you submit. the page has the hours, a written justification, checks, every day and every session, and your commits linked on github, so a reviewer can check the hours without asking you anything. it never changes after that, even if you keep working. you can limit it to some days, on the website or with `--from 2026-11-01 --to 2026-11-21`.
+
+the same page lists the review pages you made and what reviewers decided, and you can delete your account there.
 
 ## readme badge
 

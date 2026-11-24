@@ -5,7 +5,7 @@ import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import { mkdtempSync, rmSync, writeFileSync, mkdirSync } from "node:fs";
-import { createServer } from "node:http";
+import { createServer, request } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -278,6 +278,35 @@ try {
     assert.equal(info.reviewed_hours, "0.0");
     assert.equal(info.decisions[0].by, "UREVIEW1");
     assert.equal((await json("/api/slack/U123")).body.accounts[0].reviews[0].reviewed_hours, "0.0");
+  }
+
+  // 9. The same server at its other address (steer.dino.icu): someone who comes in there
+  // signs in there and gets install commands for it, so nothing sends them to the main one.
+  {
+    // fetch can't set Host, so this goes through node's http.
+    const onHost = (host, path, method = "GET") =>
+      new Promise((ok, fail) => {
+        const req = request({ host: "127.0.0.1", port: STEER_PORT, path, method, headers: { host, "x-forwarded-for": "10.7.7.7" } }, (res) => {
+          let body = "";
+          res.on("data", (c) => (body += c));
+          res.on("end", () => ok({ status: res.statusCode, headers: res.headers, body }));
+        });
+        req.on("error", fail);
+        req.end();
+      });
+    const started = await onHost("steer.dino.icu", "/api/cli-login", "POST");
+    assert.match(JSON.parse(started.body).url, /^https:\/\/steer\.dino\.icu\/login\?code=/, "the login link stays on that address");
+    const script = (await onHost("steer.dino.icu", "/install.sh")).body;
+    assert.match(script, /export STEER_SERVER=https:\/\/steer\.dino\.icu\n/, "and so does the account the install makes");
+    assert.ok(!script.includes("hackclub.app"), "nothing in it points at the main address");
+    assert.match((await onHost("steer.dino.icu", "/install.ps1")).body, /\$env:STEER_SERVER = "https:\/\/steer\.dino\.icu"/);
+    assert.match((await onHost("steer.dino.icu", "/")).body, /curl -fsSL https:\/\/steer\.dino\.icu\/install\.sh \| sh/);
+    const reviewer = await onHost("steer.dino.icu", "/reviewer/login?r=abcdefghijkl");
+    assert.equal(new URL(reviewer.headers.location).searchParams.get("redirect_uri"), "https://steer.dino.icu/auth/callback");
+    // The main address and any other host are untouched.
+    assert.match(await (await fetch(`${STEER}/install.sh`)).text(), /export STEER_SERVER=https:\/\/steer\.duck\.hackclub\.app\n/);
+    const other = await onHost("evil.example", "/api/cli-login", "POST");
+    assert.ok(JSON.parse(other.body).url.startsWith(`${STEER}/login?code=`), "a made-up Host header gets the main address");
   }
 
   console.log("login tests passed");

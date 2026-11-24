@@ -22,6 +22,10 @@ chmod +x "$bin/steer.new"
 mv "$bin/steer.new" "$bin/steer"
 echo
 
+# where this script was downloaded from, so steer signs in there too. steer.dino.icu
+# hands out this script with its own address here.
+export STEER_SERVER=https://steer.duck.hackclub.app
+
 # steer install explains what it does and asks first. this script is piped into sh,
 # so the answer has to come from the terminal.
 if (: < /dev/tty) 2>/dev/null; then

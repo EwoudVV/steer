@@ -20,6 +20,10 @@ if (-not (($userPath -split ";") -contains $bin)) {
 if (-not (($env:Path -split ";") -contains $bin)) { $env:Path = "$env:Path;$bin" }
 Write-Host ""
 
+# where this script was downloaded from, so steer signs in there too. steer.dino.icu
+# hands out this script with its own address here.
+$env:STEER_SERVER = "https://steer.duck.hackclub.app"
+
 # steer install explains what it does and asks first
 & $exe install
 exit $LASTEXITCODE

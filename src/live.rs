@@ -15,6 +15,19 @@ use std::process::{Command, Stdio};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 pub const DEFAULT_SERVER: &str = "https://steer.duck.hackclub.app";
+
+/// The server a new account goes on: STEER_SERVER if it's set, else the main one. The
+/// install script sets it to the address it was downloaded from, so someone who can only
+/// reach steer at its other address (steer.dino.icu) signs in and sends events there.
+fn default_server() -> String {
+    server_or_default(std::env::var("STEER_SERVER").ok())
+}
+
+fn server_or_default(env: Option<String>) -> String {
+    env.map(|s| s.trim().trim_end_matches('/').to_owned())
+        .filter(|s| s.starts_with("https://") || s.starts_with("http://"))
+        .unwrap_or_else(|| DEFAULT_SERVER.into())
+}
 /// Claude Code's hooks steer uses. PermissionRequest fires the moment a permission prompt
 /// shows (its Notification only comes after ~6 seconds, so quick answers would be
 /// missed), and the tool hooks carry how long each tool ran, which is when the person
@@ -1033,7 +1046,7 @@ pub fn command(args: &[String]) -> i32 {
 
 fn signup(args: &[String]) -> Result<String, String> {
     let name = positional(args).ok_or("usage: steer signup NAME")?;
-    let server = flag_value(args, "--server").unwrap_or_else(|| DEFAULT_SERVER.into());
+    let server = flag_value(args, "--server").unwrap_or_else(default_server);
     let resp = post(&server, "/api/signup", None, &json!({ "name": name }))?;
     let key = resp.get("key").and_then(Value::as_str).ok_or("server didn't send a key")?;
     let name = resp.get("name").and_then(Value::as_str).unwrap_or(name).to_owned();
@@ -1048,7 +1061,7 @@ fn signup(args: &[String]) -> Result<String, String> {
 pub(crate) fn login(args: &[String]) -> Result<String, String> {
     let server = flag_value(args, "--server")
         .or_else(|| load_config().map(|c| c.server))
-        .unwrap_or_else(|| DEFAULT_SERVER.into());
+        .unwrap_or_else(default_server);
     if let Some(key) = positional(args) {
         post(&server, "/api/events", Some(key), &json!({ "events": [] }))?;
         save_config(&Config { server, key: key.clone(), name: None })?;
@@ -1170,6 +1183,14 @@ pub(crate) fn use_temp_home() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_new_account_goes_where_the_install_script_came_from() {
+        assert_eq!(server_or_default(None), DEFAULT_SERVER);
+        assert_eq!(server_or_default(Some("https://steer.dino.icu/".into())), "https://steer.dino.icu");
+        assert_eq!(server_or_default(Some(" junk ".into())), DEFAULT_SERVER, "not a web address");
+        assert_eq!(server_or_default(Some(String::new())), DEFAULT_SERVER);
+    }
 
     #[test]
     fn newer_hooks_only_for_a_claude_code_that_knows_them() {

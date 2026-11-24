@@ -53,6 +53,23 @@ const FUTURE_SECS = 30;
 // A computer's clock can be this far off before its events get moved (see postEvents).
 const CLOCK_SLACK = 2000;
 const PUBLIC_URL = (process.env.PUBLIC_URL ?? "https://steer.duck.hackclub.app").replace(/\/$/, "");
+// The same server also answers at these addresses (each one added in Nest's dashboard and
+// as a redirect URL in the Hack Club login app), for people whose antivirus or school
+// blocks the main one. Someone who comes in on one of them gets sign-in, login links and
+// install commands for that address, so they never get sent to the blocked one.
+const ALSO_AT = new Set(
+  (process.env.ALSO_AT ?? "steer.dino.icu")
+    .split(",")
+    .map((h) => h.trim().toLowerCase())
+    .filter(Boolean),
+);
+// The address written in web/'s pages and install scripts.
+const WEB_HOST = "steer.duck.hackclub.app";
+/** The address this request came in on if it's one of the others, else the main one. */
+function baseFor(req) {
+  const host = String(req.headers.host ?? "").toLowerCase();
+  return ALSO_AT.has(host) ? `https://${host}` : PUBLIC_URL;
+}
 // Sign in with Hack Club. Without these, the server falls back to name-only signup
 // (handy for running your own).
 const HCA =
@@ -1092,15 +1109,15 @@ function reviewerLogin(req, res, review) {
   if (reviewerStates.size >= LOGINS_MAX) return page(res, "steer", "<h1>steer</h1>\n<p>Too many logins right now, try again in a few minutes.</p>", { status: 503 });
   const state = randomBytes(16).toString("base64url");
   reviewerStates.set(state, { review, created: Date.now() });
-  const q = new URLSearchParams({ client_id: HCA.id, redirect_uri: `${PUBLIC_URL}/auth/callback`, response_type: "code", scope: HCA_SCOPES, state });
+  const q = new URLSearchParams({ client_id: HCA.id, redirect_uri: `${baseFor(req)}/auth/callback`, response_type: "code", scope: HCA_SCOPES, state });
   res.writeHead(303, { location: `${HCA_BASE}/oauth/authorize?${q}` });
   res.end();
 }
 
-async function reviewerCallback(res, authCode, state) {
+async function reviewerCallback(req, res, authCode, state) {
   const { review } = reviewerStates.get(state);
   reviewerStates.delete(state);
-  const info = authCode ? await hcaUser(authCode) : null;
+  const info = authCode ? await hcaUser(authCode, `${baseFor(req)}/auth/callback`) : null;
   if (!info?.slack_id) return page(res, "steer", "<h1>steer</h1>\n<p>Hack Club didn't confirm the login, try again.</p>");
   if (!REVIEWERS.has(info.slack_id)) {
     return page(
@@ -1403,14 +1420,15 @@ async function loginGo(req, res) {
   // The login has to come back to this same browser. Otherwise someone could type their
   // own code, send the Hack Club link to someone else, and get that person's account.
   l.browser = randomBytes(18).toString("base64url");
+  const base = baseFor(req);
   const q = new URLSearchParams({
     client_id: HCA.id,
-    redirect_uri: `${PUBLIC_URL}/auth/callback`,
+    redirect_uri: `${base}/auth/callback`,
     response_type: "code",
     scope: HCA_SCOPES,
     state: l.state,
   });
-  const secure = PUBLIC_URL.startsWith("https://") ? "; Secure" : "";
+  const secure = base.startsWith("https://") ? "; Secure" : "";
   res.writeHead(303, {
     location: `${HCA_BASE}/oauth/authorize?${q}`,
     "set-cookie": `steer_login=${l.browser}; Path=/auth; HttpOnly; SameSite=Lax; Max-Age=${LOGIN_TTL / 1000}${secure}`,
@@ -1432,8 +1450,9 @@ function freeName(raw) {
   return name;
 }
 
-/** Swaps a Hack Club login code for who it is, or null. */
-async function hcaUser(authCode) {
+/** Swaps a Hack Club login code for who it is, or null. `redirectUri` is the one the
+ * login started with. */
+async function hcaUser(authCode, redirectUri) {
   try {
     const tokenRes = await fetch(`${HCA_BASE}/oauth/token`, {
       method: "POST",
@@ -1441,7 +1460,7 @@ async function hcaUser(authCode) {
       body: JSON.stringify({
         client_id: HCA.id,
         client_secret: HCA.secret,
-        redirect_uri: `${PUBLIC_URL}/auth/callback`,
+        redirect_uri: redirectUri,
         code: authCode,
         grant_type: "authorization_code",
       }),
@@ -1462,7 +1481,7 @@ async function hcaUser(authCode) {
 }
 
 async function authCallback(req, res, authCode, state) {
-  if (reviewerStates.has(state)) return reviewerCallback(res, authCode, state);
+  if (reviewerStates.has(state)) return reviewerCallback(req, res, authCode, state);
   const code = byState.get(state);
   const l = code && logins.get(code);
   if (!l || !HCA || !authCode) {
@@ -1480,7 +1499,7 @@ async function authCallback(req, res, authCode, state) {
   }
   byState.delete(state);
   l.state = null;
-  const info = await hcaUser(authCode);
+  const info = await hcaUser(authCode, `${baseFor(req)}/auth/callback`);
   if (!info) return page(res, "steer login", `<h1>steer</h1>\n<p>Hack Club didn't confirm the login. Run <code>steer login</code> again.</p>`);
   if (!info?.sub) return page(res, "steer login", `<h1>steer</h1>\n<p>Hack Club didn't send an account id.</p>`);
 
@@ -1589,7 +1608,11 @@ async function handle(req, res) {
 
   if (req.method === "GET" && Object.hasOwn(STATIC, path)) {
     const [file, type] = STATIC[path];
-    return send(res, 200, readFileSync(join(WEB, file)), type);
+    let body = readFileSync(join(WEB, file));
+    // On one of the other addresses, the pages and install commands use that address.
+    const base = baseFor(req);
+    if (base !== PUBLIC_URL && /\.(html|sh|ps1)$/.test(file)) body = body.toString("utf8").replaceAll(WEB_HOST, new URL(base).host);
+    return send(res, 200, body, type);
   }
 
   if (req.method === "GET" && path === "/accuracy") {
@@ -1620,7 +1643,7 @@ async function handle(req, res) {
     const hex = randomBytes(4).toString("hex").toUpperCase();
     const userCode = `${hex.slice(0, 4)}-${hex.slice(4)}`;
     logins.set(code, { userCode, created: Date.now(), link: userFromKey(req), state: null, tries: 0, result: null });
-    return json(res, 200, { code, user_code: userCode, url: `${PUBLIC_URL}/login?code=${code}` });
+    return json(res, 200, { code, user_code: userCode, url: `${baseFor(req)}/login?code=${code}` });
   }
   if (req.method === "GET" && (m = /^\/api\/cli-login\/([A-Za-z0-9_-]+)$/.exec(path))) {
     const l = logins.get(m[1]);

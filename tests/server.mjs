@@ -160,6 +160,11 @@ try {
     ev({ kind: "run", via: "steer", name: "cat", exit: 900 }),
     ev({ kind: "commit", via: "steer", hash: "not-a-hash" }),
     ev({ kind: "save", via: "steer", count: 0 }),
+    // Editor stretches: only from steer, from a known editor, at most an hour.
+    ev({ kind: "editor", via: "claude-code", app: "vscode", secs: 60 }),
+    ev({ kind: "editor", via: "steer", app: "notepad", secs: 60 }),
+    ev({ kind: "editor", via: "steer", app: "vscode", secs: 99_999 }),
+    ev({ kind: "editor", via: "steer", app: "cursor", secs: 1.5 }),
     ev({ t: "1" }),
     ev({ t: 1763600000000 }),
     ev({ t: undefined }),
@@ -193,6 +198,9 @@ try {
     // The check-in buttons since 0.5.5.
     ev({ kind: "checkin", via: "steer", answer: "working", answered_after: 3 }),
     ev({ kind: "checkin", via: "steer", answer: "waiting", answered_after: 2 }),
+    // A stretch of working in the project's files, from the VS Code and Cursor extension.
+    // (Earlier than the check-ins above, so it doesn't make them count as measured.)
+    ev({ kind: "editor", via: "steer", app: "vscode", secs: 60, t: iso(Date.now() - 4 * 60_000), folder: "/home/someone/game" }),
   ];
   const mixed = await post(alice, { events: [...bad, ...good] });
   assert.equal(mixed.status, 200);
@@ -205,6 +213,9 @@ try {
   assert.equal(stored[3].late, true, "10 minutes old arrives late");
   assert.equal(stored[8].late, true, "a minute ahead doesn't count");
   assert.equal(stored[9].late, true, "an hour ahead doesn't count");
+  const editor = stored.at(-1);
+  assert.deepEqual([editor.kind, editor.app, editor.secs], ["editor", "vscode", 60]);
+  assert.equal(editor.folder, undefined, "a folder path isn't kept even if something sends one");
   assert.equal((await post(alice, { events: good })).body.accepted, 0, "repeats are skipped");
 
   // 3. Rate limit per key: 5,000 at once, then 2 a second.

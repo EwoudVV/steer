@@ -448,4 +448,32 @@ assert.deepEqual(checks(reportOf([session("normal", honest())])), []);
   assert.match(renderAccuracy(a), /from a phone or another computer still count/);
 }
 
+// Working in the project's files in VS Code or Cursor (steer's editor extension): time
+// around the agent that steer couldn't see before, like fixing its code by hand.
+{
+  const min = (m) => sec(m * 60);
+  const words = { words: 20, chars: 100, images: 0, specific: 2, observation: false, generic: false, repeat: false };
+  const code = {
+    path: "cc3",
+    cwd: "/home/x/game",
+    title: null,
+    events: [
+      { id: "w1", t: min(0), kind: "prompt", prompt: words },
+      { id: "w2", t: min(2), kind: "agent", tools: [], stop: true },
+      { id: "w3", t: min(40), kind: "prompt", prompt: words },
+      { id: "w4", t: min(41), kind: "agent", tools: [], stop: true },
+    ],
+  };
+  const sig = signalsOf([{ t: min(10), kind: "editor", secs: 600 }], [code]);
+  assert.ok(sig.extra.some(([a, b]) => a === min(10) && b === min(20)), "fixing the code from 10 to 20 minutes");
+  assert.ok(sig.known.some(([a, b]) => a <= min(10) && b >= min(20)), "and someone was at the computer then");
+  const projects = buildReport([code], { days: null, now: sec(10 * 86400) });
+  const m = checkinMoments(projects, [code], [{ t: min(15), answer: "working" }], sig);
+  assert.deepEqual(
+    m.map((x) => [x.covered, x.steer, x.signals]),
+    [[true, 0, 1]],
+    "steer now misses it (the next prompt is too far off), the new counting has it",
+  );
+}
+
 console.log("counting tests passed");

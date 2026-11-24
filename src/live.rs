@@ -298,8 +298,8 @@ pub(crate) fn enqueue(events: &[Value]) -> Option<()> {
     }
     fs::create_dir_all(dir()).ok()?;
     // When an AI tool was last used, for check-ins and the idle timer (which don't count
-    // as use themselves).
-    if events.iter().any(|e| !matches!(e["kind"].as_str(), Some("checkin" | "away" | "back" | "here"))) {
+    // as use themselves, and neither does working in an editor).
+    if events.iter().any(|e| !matches!(e["kind"].as_str(), Some("checkin" | "away" | "back" | "here" | "editor"))) {
         let now = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
         let _ = fs::write(dir().join("last-activity"), now.to_string());
     }
@@ -664,6 +664,9 @@ pub(crate) fn setup_all(remove: bool, watch: bool) -> Result<String, String> {
     }
     if watch {
         msg += &format!("\n{}", crate::watch::autostart(remove)?);
+        // The watcher is what reads the editor extension's notes, so no watcher, no
+        // extension. Taking steer out always takes it out.
+        msg += &format!("\n{}", crate::editor::install(remove));
     }
     msg += &format!("\n{}", crate::native::install(remove));
     Ok(msg)

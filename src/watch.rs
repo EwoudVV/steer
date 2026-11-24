@@ -120,6 +120,9 @@ pub fn run() -> i32 {
         skip_copilot = false;
         skip_freebuff = false;
         events.extend(crate::evidence::poll(&mut evidence));
+        if let Some(s) = state.entry("editor").or_insert_with(|| json!({})).as_object_mut() {
+            events.extend(crate::editor::poll(s));
+        }
         events.extend(crate::idle::poll(&mut presence, now_secs()));
 
         let _ = enqueue(&events);

@@ -36,6 +36,7 @@ steer uninstall
 - codex, opencode, copilot and freebuff dont have hooks like that, so a small background watcher (`steer watch`) reads their session logs every 5 seconds. it uses about 0.2% cpu
 - the watcher also looks at the git repos you used an ai tool in during the last hour, every 30 seconds, to see when you change code or commit yourself. that counts the time you spend coding and testing by hand between prompts, within 30 minutes of using an ai tool. a change only counts if the agent wasn't editing right then, and saving a file without changing it or undoing back to how it was doesnt count. it only lists files with git and compares them itself, so nothing in a repo's own git settings can run
 - for chatgpt and claude on the web there's a browser extension. it sees when you send a message and when the answer is done, works out the prompt's counts right there in the browser, and gives only the counts to steer on your computer
+- in vs code and cursor, `steer setup` adds a small extension that notes when you type, click or scroll in a project's files while the editor is in front. an agent editing files doesnt count, since that happens without any typing or clicking. it writes the folder and the times to `~/.steer`, and the watcher sends just the project and the times, for projects you used an ai tool in around then
 - events go into a queue in `~/.steer` and get sent to the server in the background, so your tools never wait on the network
 - the server stamps each event when it arrives. anything more than 5 minutes off doesnt count, so you cant make up old sessions later
 
@@ -68,6 +69,7 @@ steer also collects a few signs of what you're doing, so it can count your time 
 `focus: id, session, project, time, on`: a chatgpt or claude tab came to the front, or stopped being there
 `copy / typing: id, session, project, time`: you copied something out of a chatgpt or claude tab, or started typing your next message there (never the text)
 `away / back / here: id, time, away_secs`: from your computer's idle timer, only within an hour of using an ai tool. away when nobody touched the keyboard or mouse for 2 minutes, back when someone does again (with how long they were gone), and here every 5 minutes while someone's there. the idle timer is one number of seconds, with no app names and nothing about what you typed
+`editor: id, project, time, secs, app`: from the vs code and cursor extension, how long you were typing, clicking or scrolling in a project's files, and which editor. only for projects you used an ai tool in within 2 hours of it, never file names, code or what you typed
 
 prompts also say which permission mode claude code or codex was in (like default or never), and tool events say how long the tool ran.
 

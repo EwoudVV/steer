@@ -57,6 +57,19 @@ fn read_repos() -> Map<String, Value> {
     fs::read_to_string(repos_path()).ok().and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default()
 }
 
+/// The projects an AI tool was used in (by name, as events have it), and when it was
+/// last used in each. For the editor extension's stretches (src/editor.rs).
+pub(crate) fn used_projects() -> HashMap<String, i64> {
+    let mut out = HashMap::new();
+    for v in read_repos().values() {
+        if let (Some(name), Some(used)) = (v["name"].as_str(), v["used"].as_i64()) {
+            let last = out.entry(name.to_owned()).or_insert(used);
+            *last = (*last).max(used);
+        }
+    }
+    out
+}
+
 /// Called with every batch of events that gets queued: remembers which git repos the AI
 /// tools were used in, and when the agent last did something there. Stored in
 /// ~/.steer/repos.json, which never leaves the computer.

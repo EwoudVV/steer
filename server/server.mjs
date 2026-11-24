@@ -220,7 +220,7 @@ function note(store, e) {
 
 const NAME = /^[a-z0-9][a-z0-9_-]{1,31}$/;
 const clean = (s, max) => (typeof s === "string" ? s.replace(/[\u0000-\u001f]/g, "").slice(0, max) : "");
-const KINDS = new Set(["prompt", "tool", "stop", "interrupt", "checkin", "run", "save", "commit", "wait", "focus", "copy", "typing", "away", "back", "here"]);
+const KINDS = new Set(["prompt", "tool", "stop", "interrupt", "checkin", "run", "save", "commit", "wait", "focus", "copy", "typing", "away", "back", "here", "editor"]);
 // Evidence from the project, sent by steer's watcher and terminal lines: a command you ran
 // (its first word and exit code), that files were saved, a commit's hash.
 const EVIDENCE = new Set(["run", "save", "commit"]);
@@ -242,11 +242,14 @@ const INTERRUPTS = new Set(["codex", "copilot", "claude-code"]);
 // - "away", "back", "here": from the computer's idle timer. Nobody touched the keyboard
 //   or mouse for 2 minutes, someone did again (with how long they were gone), and every
 //   5 minutes while someone's there, so a stretch with none of these is unknown
-const ATTENTION = new Set(["wait", "focus", "copy", "typing", "away", "back", "here"]);
+// - "editor": from steer's VS Code and Cursor extension, a stretch of `secs` seconds from
+//   `t` someone was typing, clicking or scrolling in the project's files
+const ATTENTION = new Set(["wait", "focus", "copy", "typing", "away", "back", "here", "editor"]);
 const WAITS = { via: new Set(["claude-code", "codex", "cursor"]), reasons: new Set(["permission", "question"]) };
 const CHATS = new Set(["chatgpt", "claude-ai"]);
+const EDITORS = new Set(["vscode", "cursor"]);
 // Sent by steer itself rather than an AI tool.
-const FROM_STEER = new Set(["checkin", "run", "save", "commit", "away", "back", "here"]);
+const FROM_STEER = new Set(["checkin", "run", "save", "commit", "away", "back", "here", "editor"]);
 // Permission settings a prompt can carry: Claude Code's modes and Codex's approval
 // policies. Says whether the agent could stop to ask the person at all.
 const MODES = new Set(["default", "plan", "acceptEdits", "auto", "dontAsk", "bypassPermissions", "never", "on-request", "on-failure", "untrusted"]);
@@ -272,6 +275,7 @@ function accept(raw, now) {
   if (kind === "wait" && (!WAITS.via.has(via) || !WAITS.reasons.has(raw.reason))) return null;
   if ((kind === "focus" || kind === "copy" || kind === "typing") && !CHATS.has(via)) return null;
   if (kind === "focus" && typeof raw.on !== "boolean") return null;
+  if (kind === "editor" && (!EDITORS.has(raw.app) || !Number.isInteger(raw.secs) || raw.secs < 0 || raw.secs > 3600)) return null;
   if (kind === "checkin" && !ANSWERS.has(raw.answer)) return null;
   const t = typeof raw.t === "string" && TIME.test(raw.t) ? Date.parse(raw.t) : NaN;
   if (Number.isNaN(t)) return null;
@@ -338,6 +342,10 @@ function accept(raw, now) {
   }
   if (kind === "wait") e.reason = raw.reason;
   if (kind === "focus") e.on = raw.on;
+  if (kind === "editor") {
+    e.secs = raw.secs;
+    e.app = raw.app;
+  }
   if (kind === "back") {
     const secs = raw.away_secs;
     if (secs != null && (!Number.isInteger(secs) || secs < 0 || secs > 7 * 86400)) return null;
@@ -572,7 +580,7 @@ function workerMain() {
       await eachEvent(name, (e) => {
         if (e.late) return;
         if (e.kind === "checkin" && typeof e.answer === "string") answers.push({ t: Date.parse(e.t), answer: e.answer });
-        else if (ATTENTION.has(e.kind)) attention.push({ t: Date.parse(e.t), kind: e.kind, session: e.session, on: e.on, away_secs: e.away_secs });
+        else if (ATTENTION.has(e.kind)) attention.push({ t: Date.parse(e.t), kind: e.kind, session: e.session, on: e.on, away_secs: e.away_secs, secs: e.secs });
       });
       if (!answers.length) return [];
       const sessions = await sessionsOf(name);

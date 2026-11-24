@@ -142,6 +142,13 @@ pub fn install(args: &[String]) -> Result<String, String> {
     );
     if watch {
         println!("  - run a small background watcher that starts at login. it reads codex, opencode, copilot and freebuff logs, and notices when you change code or commit in repos you use ai in (only counts get sent, never file names or code)");
+        let editors: Vec<&str> = crate::editor::status().into_iter().map(|(name, _)| name).collect();
+        if !editors.is_empty() {
+            println!(
+                "  - add a small steer extension to {}. it notes when you're typing, clicking or scrolling in a project's files, and for projects you use ai in, steer sends the project and the times (never file names or code)",
+                editors.join(" and ")
+            );
+        }
     }
     if let Some(change) = &path {
         println!("  - {}", describe(change));
@@ -542,6 +549,13 @@ pub fn doctor() -> i32 {
     } else {
         Check::Fix("the watcher (codex, opencode, copilot, freebuff, saves and commits) isn't running, run steer setup".into())
     });
+    for (editor, on) in crate::editor::status() {
+        checks.push(if on {
+            Check::Ok(format!("the {editor} extension is on"))
+        } else {
+            Check::Fix(format!("the {editor} extension isn't in {editor}, run steer setup"))
+        });
+    }
     checks.push(match crate::idle::seconds() {
         Some(_) => Check::Ok("can tell when you're away from the computer (idle time)".into()),
         None if cfg!(target_os = "linux") => {

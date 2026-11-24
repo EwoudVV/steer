@@ -19,6 +19,7 @@ jobs:
       - run: node tests/login.mjs
       - run: node tests/counting.mjs
       - run: node tests/extension.mjs
+      - run: node tests/editor.mjs
       - run: node tests/server.mjs
       # installs, sends an event, updates and uninstalls a real build on each system
       - run: cargo build --release --locked

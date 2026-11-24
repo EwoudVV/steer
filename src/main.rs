@@ -2,6 +2,7 @@ mod analyze;
 mod checkin;
 mod codex;
 mod copilot;
+mod editor;
 mod evidence;
 mod freebuff;
 mod idle;

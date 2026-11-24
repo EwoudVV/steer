@@ -374,6 +374,16 @@ try {
     assert.match(home, /href="\/me\/submit\?project=kart"/, "the project from the terminal tests is there");
     assert.match(home, /rejected<\/span> by udo/, "with what the reviewer decided on its review page");
     assert.match(home, /You're on the reviewer list/, "U123 is a reviewer in these tests");
+    assert.ok(!home.includes("New counting"), "without any signals there's only one number");
+
+    // Once steer has signals (here the editor extension), the counting it's testing shows next to it.
+    const iso = (s) => new Date(Date.now() - s * 1000).toISOString();
+    const editor = { id: "ed1", session: "editor", project: "kart", via: "steer", kind: "editor", app: "vscode", secs: 90, t: iso(120) };
+    assert.equal((await json("/api/events", { method: "POST", headers: { authorization: `Bearer ${linked.key}` }, body: JSON.stringify({ events: [editor] }) })).body.accepted, 1);
+    await new Promise((ok) => setTimeout(ok, 10_500)); // pages are kept 10 s after new events
+    const withSignals = await get("/me", cookie);
+    assert.match(withSignals, /<th class="r">New counting<\/th>/);
+    assert.match(withSignals, /New counting is what steer is testing next/);
 
     // Submitting from the website.
     const form = await get("/me/submit?project=kart", cookie);

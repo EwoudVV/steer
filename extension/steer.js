@@ -1396,6 +1396,8 @@ export function checkinMoments(projects, sessions, checkins, signals = null) {
     .flatMap((p) => p.sessions.flatMap((s) => s.turns.map((u) => ({ u, path: s.path }))))
     .filter(({ u }) => u.human > 0)
     .map(({ u, path }) => [u.t - u.human * 1000, u.t, path, u.kind]);
+  // What the counting with the attention signals gives, the same ranges its totals use.
+  const withSignals = signals ? signalRanges(projects, signals).all : null;
   const times = sessions.flatMap((s) => s.events.map((e) => e.t)).sort((a, b) => a - b);
   /** How many event times are at or before t. */
   const upTo = (t) => {
@@ -1430,7 +1432,7 @@ export function checkinMoments(projects, sessions, checkins, signals = null) {
       // The question shows on the computer, so nobody could have answered it there.
       if (!(remote && c.answer === "none")) {
         m.covered = true;
-        m.signals = remote || (!inside(signals.away, c.t) && (turns.length > 0 || inside(signals.extra, c.t))) ? 1 : 0;
+        m.signals = inside(withSignals, c.t) ? 1 : 0;
         m.running = inside(signals.agentRuns, c.t);
       }
     }
@@ -1521,6 +1523,14 @@ export function signalsOf(events, sessions) {
   const bySession = new Map(sessions.map((s) => [s.path, s]));
   const extra = [];
   const remote = [];
+  // The same ranges by project, for the totals per project.
+  const extraBy = [];
+  const remoteBy = [];
+  const add = (all, by, e, range) => {
+    all.push(range);
+    const project = e.project ?? bySession.get(e.session)?.cwd;
+    if (project) by.push({ project: projectName(project), range });
+  };
   const chats = new Set();
   for (const e of sorted) {
     if (e.kind === "wait") {
@@ -1529,28 +1539,29 @@ export function signalsOf(events, sessions) {
       const end = next ? (Number.isFinite(next.ms) ? next.t - next.ms : next.t) : e.t;
       const deciding = [e.t, Math.min(Math.max(end, e.t), e.t + DECIDE_MAX)];
       // Answered while nobody touched the computer: from a phone or another computer.
-      (next && remoteAt(awayRanges, end) ? remote : extra).push(deciding);
+      if (next && remoteAt(awayRanges, end)) add(remote, remoteBy, e, deciding);
+      else add(extra, extraBy, e, deciding);
     } else if (e.kind === "typing") {
       chats.add(e.session);
       const sent = bySession.get(e.session)?.events.find((x) => x.kind === "prompt" && x.t >= e.t);
-      if (sent) extra.push([e.t, Math.min(sent.t, e.t + TYPING_MAX)]);
+      if (sent) add(extra, extraBy, e, [e.t, Math.min(sent.t, e.t + TYPING_MAX)]);
     } else if (e.kind === "editor") {
       // Working in the project's files: the time around the agent that steer couldn't see.
-      extra.push([e.t, e.t + (e.secs ?? 0) * 1000]);
+      add(extra, extraBy, e, [e.t, e.t + (e.secs ?? 0) * 1000]);
     }
   }
   // A chat tab in front: from "on" until "off" (or at most FOCUS_MAX).
   const open = new Map();
   for (const e of sorted.filter((x) => x.kind === "focus")) {
     chats.add(e.session);
-    const from = open.get(e.session);
-    if (e.on && from === undefined) open.set(e.session, e.t);
-    else if (!e.on && from !== undefined) {
-      extra.push([from, Math.min(e.t, from + FOCUS_MAX)]);
+    const was = open.get(e.session);
+    if (e.on && was === undefined) open.set(e.session, e);
+    else if (!e.on && was !== undefined) {
+      add(extra, extraBy, was, [was.t, Math.min(e.t, was.t + FOCUS_MAX)]);
       open.delete(e.session);
     }
   }
-  for (const from of open.values()) extra.push([from, from + FOCUS_MAX]);
+  for (const was of open.values()) add(extra, extraBy, was, [was.t, was.t + FOCUS_MAX]);
 
   // An agent working: from a prompt to the end of that turn.
   const agentRuns = [];
@@ -1576,11 +1587,100 @@ export function signalsOf(events, sessions) {
     remote: mergeRanges(remote),
     chats,
     agentRuns: mergeRanges(agentRuns),
+    extraBy,
+    remoteBy,
   };
 }
 
-/** Adds up checkinMoments for several people (one list each). */
-export function accuracy(people) {
+/** The parts of merged `ranges` outside merged `cut`. */
+function subtract(ranges, cut) {
+  const out = [];
+  for (const [a, b] of ranges) {
+    let from = a;
+    for (const [c, d] of cut) {
+      if (d <= from) continue;
+      if (c >= b) break;
+      if (c > from) out.push([from, c]);
+      from = Math.max(from, d);
+      if (from >= b) break;
+    }
+    if (from < b) out.push([from, b]);
+  }
+  return out;
+}
+
+/** The parts of merged `ranges` inside merged `keep`. */
+function within(ranges, keep) {
+  const out = [];
+  for (const [a, b] of ranges) {
+    for (const [c, d] of keep) {
+      if (d <= a) continue;
+      if (c >= b) break;
+      out.push([Math.max(a, c), Math.min(b, d)]);
+    }
+  }
+  return out;
+}
+
+const secsOf = (ranges) => Math.round(ranges.reduce((n, [a, b]) => n + (b - a), 0) / 1000);
+
+/**
+ * The time the counting with the attention signals gives, as merged [from, to] ranges,
+ * per project and all together: what steer counts now minus time away from the
+ * computer, plus the time the signals show was the person's. A turn sent from a phone or
+ * another computer keeps its time, since the idle timer only sees this one. Browser chats
+ * count from their own signals. Where steer has no signals, it's the same as now.
+ */
+export function signalRanges(projects, signals) {
+  const here = [];
+  const kept = [];
+  const byKey = new Map();
+  const of = (name) => {
+    const key = projectKey(name);
+    if (!byKey.has(key)) byKey.set(key, { name, here: [], kept: [] });
+    return byKey.get(key);
+  };
+  for (const p of projects) {
+    const mine = of(p.name);
+    for (const s of p.sessions) {
+      if (signals.chats.has(s.path)) continue;
+      for (const u of s.turns) {
+        if (!(u.human > 0)) continue;
+        const range = [u.t - u.human * 1000, u.t];
+        const remote = REMOTE_KINDS.has(u.kind) && remoteAt(signals.away, u.t);
+        (remote ? kept : here).push(range);
+        (remote ? mine.kept : mine.here).push(range);
+      }
+    }
+  }
+  for (const { project, range } of signals.extraBy ?? []) of(project).here.push(range);
+  for (const { project, range } of signals.remoteBy ?? []) of(project).kept.push(range);
+  const counted = (h, k) => mergeRanges([...subtract(mergeRanges(h), signals.away), ...k]);
+  return {
+    all: counted([...here, ...signals.extra], [...kept, ...signals.remote]),
+    projects: [...byKey.values()].map((p) => ({ name: p.name, ranges: counted(p.here, p.kept) })),
+  };
+}
+
+/**
+ * Totals for one person with the counting that uses the attention signals, next to what
+ * steer counts now: seconds per project, and both totals over the time steer had signals
+ * from them (null if it never did), which is where the two can differ.
+ */
+export function signalTotals(projects, signals) {
+  const { all, projects: each } = signalRanges(projects, signals);
+  const now = mergeRanges(
+    projects.flatMap((p) => p.sessions.flatMap((s) => s.turns.filter((u) => u.human > 0).map((u) => [u.t - u.human * 1000, u.t]))),
+  );
+  return {
+    projects: each.map((p) => ({ name: p.name, secs: secsOf(p.ranges) })),
+    measured: signals.known.length ? { now: secsOf(within(now, signals.known)), signals: secsOf(within(all, signals.known)) } : null,
+  };
+}
+
+/** Adds up checkinMoments for several people (one list each), and signalTotals'
+ * `measured` for them if given. */
+export function accuracy(people, totalsEach = []) {
   people = people.filter((p) => p.length);
   const all = people.flat();
   const mean = (xs, f) => (xs.length ? xs.reduce((n, x) => n + f(x), 0) / xs.length : null);
@@ -1620,6 +1720,16 @@ export function accuracy(people) {
         })(),
       }
     : null;
+  // Both countings' totals over the time steer had signals from each person.
+  const tallies = totalsEach.filter((m) => m && m.now + m.signals > 0);
+  const totals = tallies.length
+    ? {
+        people: tallies.length,
+        now: tallies.reduce((n, m) => n + m.now, 0),
+        signals: tallies.reduce((n, m) => n + m.signals, 0),
+        each: tallies.filter((m) => m.now > 0).map((m) => (m.signals - m.now) / m.now).sort((a, b) => b - a),
+      }
+    : null;
   return {
     people: people.length,
     judged: judged.length,
@@ -1627,6 +1737,7 @@ export function accuracy(people) {
     byAnswer,
     truth,
     signals,
+    totals,
     ways: COUNTING_WAYS.map((w) => {
       const share = mean(all, (m) => m[w.key]);
       return {
@@ -1685,17 +1796,17 @@ ${a.ways
 <li><b>Each person off by</b>: how far each person's own total is from their own answers, on average, for the ${a.judged} ${a.judged === 1 ? "person" : "people"} with ${MIN_ANSWERS_EACH} or more answers. This is what decides whether someone gets their real hours, since a way of counting can be right on average and still give some people too much and others too little.</li>
 </ul>
 `;
-  html += renderSignals(a.signals, pct, points);
+  html += renderSignals(a.signals, pct, points, a.totals);
   if (updated) html += `<p class="muted">Worked out ${esc(updated)}.</p>\n`;
   return html + howAccuracy();
 }
 
 /** The part of the accuracy page about counting with the attention signals. */
-function renderSignals(sig, pct, points) {
+function renderSignals(sig, pct, points, totals = null) {
   let html = `<h2>With the new signals</h2>
 <p>Since steer 0.5.4, steer also knows when nobody's at the computer (its idle timer), when a permission prompt is waiting on the person, and when a ChatGPT or Claude tab is in front. Since 0.5.7 its VS Code and Cursor extension also says when someone is typing, clicking or scrolling in a project's files. Counted with those: the same as now, minus time away from the computer, plus deciding on permission prompts, plus time working in the project's files, and browser chats counted from the tab being in front and from writing each message. Prompts and answers sent from a phone or another computer still count, since the idle timer only sees the computer steer runs on, and check-ins nobody could answer because they were on another device are left out. The agent working by itself still counts zero. It isn't what steer counts yet. It's here to see whether it's closer.</p>
 `;
-  if (!sig) return html + `<p>No answers yet from while these were being measured.</p>\n`;
+  if (!sig) return html + `<p>No answers yet from while these were being measured.</p>\n` + renderTotals(totals);
   html += `<p><b>${sig.answers} ${sig.answers === 1 ? "answer" : "answers"} from ${sig.people} ${sig.people === 1 ? "person" : "people"}</b> while they were being measured. People said they were working at ${pct(sig.truth)} of these moments.${sig.people < 15 ? " That's too few to tell which one is closer yet." : ""}</p>
 <table class="list">
 <tr><th>Way of counting</th><th>Counted</th><th>When they were working</th><th>When they weren't</th><th>Total off by</th></tr>
@@ -1705,7 +1816,16 @@ ${sig.ways.map((w) => `<tr><td>${esc(w.name)}</td><td>${pct(w.share)}</td><td>${
   if (sig.missedWhileRunning) {
     html += `<p>Of the ${sig.missedWhileRunning.of} working ${sig.missedWhileRunning.of === 1 ? "moment" : "moments"} the new counting still missed, ${pct(sig.missedWhileRunning.share)} were while an agent was working, which steer leaves out on purpose. That's the open question: whether watching the agent work is your time.</p>\n`;
   }
-  return html;
+  return html + renderTotals(totals);
+}
+
+/** How much time each counting gives over the time steer had signals. */
+function renderTotals(totals) {
+  if (!totals) return "";
+  const change = (x) => `${x >= 0 ? "+" : ""}${Math.round(x * 100)}%`;
+  const diff = totals.now ? (totals.signals - totals.now) / totals.now : null;
+  const each = totals.each.length > 1 ? ` Per person: ${totals.each.map(change).join(", ")}.` : "";
+  return `<p>Over all the time steer had these signals from ${totals.people === 1 ? "this person" : `these ${totals.people} people`}, it counted ${fmtDur(totals.now)} the way it counts now and ${fmtDur(totals.signals)} with the new signals${diff === null ? "" : `, ${change(diff)}`}.${each} Everyone can see both numbers for their own projects on <a href="/me">/me</a>.</p>\n`;
 }
 
 function howAccuracy() {

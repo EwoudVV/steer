@@ -4,7 +4,7 @@
 //   node tests/counting.mjs
 
 import assert from "node:assert/strict";
-import { accuracy, analyzePrompt, applyCaps, buildReport, checkinMoments, checks, gapCredit, projectHuman, projectKey, projectOverlap, renderAccuracy, rulesFrom, signalsOf } from "../web/steer.js";
+import { accuracy, analyzePrompt, applyCaps, buildReport, checkinMoments, checks, gapCredit, projectHuman, projectKey, projectOverlap, renderAccuracy, rulesFrom, signalsOf, signalTotals } from "../web/steer.js";
 
 const T0 = Date.UTC(2026, 10, 20, 15, 0, 0);
 const sec = (s) => T0 + s * 1000;
@@ -474,6 +474,52 @@ assert.deepEqual(checks(reportOf([session("normal", honest())])), []);
     [[true, 0, 1]],
     "steer now misses it (the next prompt is too far off), the new counting has it",
   );
+}
+
+// The new counting as totals: per project, and both countings over the time steer had
+// signals. This is the second number on /me and the totals on /accuracy.
+{
+  const min = (m) => sec(m * 60);
+  const words = { words: 20, chars: 100, images: 0, specific: 2, observation: false, generic: false, repeat: false };
+  const code = {
+    path: "cc4",
+    cwd: "/home/x/game",
+    title: null,
+    events: [
+      { id: "v1", t: min(0), kind: "prompt", prompt: words },
+      { id: "v2", t: min(2), kind: "agent", tools: [], stop: true },
+      { id: "v3", t: min(40), kind: "prompt", prompt: words },
+      { id: "v4", t: min(41), kind: "agent", tools: [], stop: true },
+      { id: "v5", t: min(43), kind: "prompt", prompt: words },
+      { id: "v6", t: min(44), kind: "agent", tools: [], stop: true },
+    ],
+  };
+  const projects = buildReport([code], { days: null, now: sec(10 * 86400) });
+  const now = projectHuman(projects[0]);
+  const attention = [
+    { t: min(10), kind: "editor", secs: 600, project: "game" }, // fixing its code by hand
+    { t: min(30), kind: "editor", secs: 60, project: "Other Repo" }, // another project
+    { t: min(41.5), kind: "away", project: "presence" }, // gone right after the agent stopped ...
+    { t: min(42.5), kind: "back", away_secs: 60, project: "presence" }, // ... for a minute
+  ];
+  const sig = signalsOf(attention, [code]);
+  const totals = signalTotals(projects, sig);
+  const game = totals.projects.find((p) => projectKey(p.name) === "game");
+  const other = totals.projects.find((p) => projectKey(p.name) === "other-repo");
+  assert.equal(other.secs, 60, "time in another project's files goes to that project");
+  assert.equal(game.secs, now + 600 - 60, "plus the ten minutes in the files, minus the minute away");
+  assert.equal(totals.measured.signals - totals.measured.now, 600 - 60 + 60, "the difference is all in the time steer had signals");
+  // Nothing from the signals: the same as now.
+  const none = signalTotals(projects, signalsOf([], [code]));
+  assert.equal(none.projects[0].secs, now);
+  assert.equal(none.measured, null);
+
+  const moments = checkinMoments(projects, [code], [{ t: min(15), answer: "working" }], sig);
+  assert.equal(moments[0].signals, 1, "a check-in in the same ranges the totals add up");
+  const a = accuracy([moments], [totals.measured, null, { now: 100, signals: 80 }]);
+  assert.equal(a.totals.people, 2);
+  assert.match(renderAccuracy(a), /from these 2 people, it counted/);
+  assert.match(renderAccuracy(a), /Per person: \+\d+%, -20%\./);
 }
 
 console.log("counting tests passed");

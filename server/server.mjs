@@ -31,6 +31,7 @@ import {
   renderReview,
   renderWeekly,
   signalsOf,
+  signalTotals,
   reviewFacts,
   rulesFrom,
   weekly,
@@ -572,20 +573,35 @@ function workerMain() {
     return r.projects;
   }
 
+  /** A person's check-in answers and attention signals. */
+  async function signalEvents(name) {
+    const answers = [];
+    const attention = [];
+    await eachEvent(name, (e) => {
+      if (e.late) return;
+      if (e.kind === "checkin" && typeof e.answer === "string") answers.push({ t: Date.parse(e.t), answer: e.answer });
+      else if (ATTENTION.has(e.kind)) {
+        attention.push({ t: Date.parse(e.t), kind: e.kind, session: e.session, project: e.project, on: e.on, away_secs: e.away_secs, secs: e.secs });
+      }
+    });
+    return { answers, attention };
+  }
+
   async function job({ op, name, version, project, from, to, info }) {
     if (op === "forget") return void kept.delete(name); // the account was deleted
     const projects = await projectsOf(name, version);
     if (op === "checkins") {
-      const answers = [];
-      const attention = [];
-      await eachEvent(name, (e) => {
-        if (e.late) return;
-        if (e.kind === "checkin" && typeof e.answer === "string") answers.push({ t: Date.parse(e.t), answer: e.answer });
-        else if (ATTENTION.has(e.kind)) attention.push({ t: Date.parse(e.t), kind: e.kind, session: e.session, on: e.on, away_secs: e.away_secs, secs: e.secs });
-      });
-      if (!answers.length) return [];
+      const { answers, attention } = await signalEvents(name);
+      if (!answers.length) return { moments: [], measured: null };
       const sessions = await sessionsOf(name);
-      return checkinMoments(projects, sessions, answers, signalsOf(attention, sessions));
+      const signals = signalsOf(attention, sessions);
+      return { moments: checkinMoments(projects, sessions, answers, signals), measured: signalTotals(projects, signals).measured };
+    }
+    // The counting steer is trying next, next to what it counts now. Null without signals.
+    if (op === "signals") {
+      const { attention } = await signalEvents(name);
+      if (!attention.length) return null;
+      return signalTotals(projects, signalsOf(attention, await sessionsOf(name)));
     }
     // Found by key, so the same project under another folder name is found too.
     const named = (x) => projectKey(x.name) === projectKey(project);
@@ -731,6 +747,10 @@ const reportOf = (name, store) =>
     ? Promise.resolve({ profile: "", hours: [] })
     : cached(`r\n${name}`, name, store, { op: "report" }, (v) => v.profile.length + JSON.stringify(v.hours).length);
 
+/** The counting with the attention signals, per project, or null without signals. */
+const signalTimeOf = (name, store) =>
+  store.counted === 0 ? Promise.resolve(null) : cached(`s\n${name}`, name, store, { op: "signals" }, (v) => JSON.stringify(v).length);
+
 const projectOf = (name, store, project) =>
   cached(`p\n${name}\n${project}`, name, store, { op: "project", project }, (v) => v?.length ?? 0);
 
@@ -774,12 +794,15 @@ function accuracyHtml() {
   if (!accuracyWorking) {
     accuracyWorking = (async () => {
       const people = [];
+      const measured = [];
       for (const name of await checkinAccounts()) {
         const store = await storeOf(name);
-        people.push(await cached(`c\n${name}`, name, store, { op: "checkins" }, (v) => v.length * 80));
+        const v = await cached(`c\n${name}`, name, store, { op: "checkins" }, (x) => x.moments.length * 80 + 64);
+        people.push(v.moments);
+        measured.push(v.measured);
       }
       const updated = new Date().toISOString().slice(0, 16).replace("T", " ") + " UTC";
-      const html = renderAccuracy(accuracy(people), { updated });
+      const html = renderAccuracy(accuracy(people, measured), { updated });
       accuracyPage = { at: Date.now(), html };
       return html;
     })().finally(() => (accuracyWorking = null));
@@ -1502,18 +1525,26 @@ ${installBox(req)}<p class="muted">Made a steer account before you could sign in
     return page(res, "your steer", body, { csp: ME_CSP, script: "/copy.js" });
   }
   body += madeNotice(name, url.searchParams.get("made"));
-  const { hours } = await reportOf(name, await storeOf(name));
+  const store = await storeOf(name);
+  const { hours } = await reportOf(name, store);
+  // The counting steer is testing, shown next to the real one once steer has signals.
+  const tested = await signalTimeOf(name, store).catch(() => null);
+  const testedSecs = (p) => tested?.projects.find((x) => projectKey(x.name) === projectKey(p.name))?.secs ?? p.your_secs;
+  const both = Boolean(tested?.measured);
   const u = encodeURIComponent(name);
   body += `<h2>Projects</h2>\n`;
   if (!hours.length) {
     body += `<p>Nothing tracked yet. Once you work with an AI tool in a project it shows up here, usually within a minute. If steer isn't on this computer yet:</p>\n${installBox(req)}`;
   } else {
-    body += `<table class="list">\n<tr><th>Project</th><th class="r">Your time</th><th class="r">Agent time</th><th class="r">Sessions</th><th></th></tr>\n`;
+    body += `<table class="list">\n<tr><th>Project</th><th class="r">Your time</th>${both ? `<th class="r">New counting</th>` : ""}<th class="r">Agent time</th><th class="r">Sessions</th><th></th></tr>\n`;
     for (const p of hours) {
       const q = encodeURIComponent(p.name);
-      body += `<tr><td><a href="/u/${u}/${q}">${esc(p.name)}</a></td><td class="r">${esc(p.your_time)}</td><td class="r">${esc(fmtDur(p.agent_secs))}</td><td class="r">${p.sessions}</td><td><a href="/me/submit?project=${q}">submit for review</a></td></tr>\n`;
+      body += `<tr><td><a href="/u/${u}/${q}">${esc(p.name)}</a></td><td class="r">${esc(p.your_time)}</td>${both ? `<td class="r">${esc(fmtDur(testedSecs(p)))}</td>` : ""}<td class="r">${esc(fmtDur(p.agent_secs))}</td><td class="r">${p.sessions}</td><td><a href="/me/submit?project=${q}">submit for review</a></td></tr>\n`;
     }
     body += `</table>\n<p class="muted">Your time is what counts: writing prompts, reading what the agent did, testing and fixing things. Agent time is when it ran by itself.</p>\n`;
+    if (both) {
+      body += `<p class="muted">New counting is what steer is testing next. It takes out time you were away from the computer, and adds time the VS Code or Cursor extension saw you working in the project's files, deciding on permission prompts and ChatGPT or Claude chats. It doesn't count toward anything yet. If one of the two is closer to what you actually did, tell duck on Slack, that helps decide which one steer keeps. How close each one is to people's check-ins is on <a href="/accuracy">/accuracy</a>.</p>\n`;
+    }
   }
   const reviews = [...(users[name].reviews ?? [])].reverse();
   if (reviews.length) {

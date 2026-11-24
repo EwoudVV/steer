@@ -1,6 +1,6 @@
 [package]
 name = "steer"
-version = "0.5.5"
+version = "0.5.6"
 edition = "2021"
 license = "AGPL-3.0-or-later"
 description = "tracks how much time you spend working with ai agents"

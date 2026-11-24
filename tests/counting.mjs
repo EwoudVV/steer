@@ -393,4 +393,59 @@ assert.deepEqual(checks(reportOf([session("normal", honest())])), []);
   assert.match(renderAccuracy(accuracy([checkinMoments(projects, [code, chat], answers)])), /No answers yet from while these were being measured/);
 }
 
+// Steering from a phone (remote control, T3 Code): nobody touches the computer, but the
+// prompts and permission answers still come.
+{
+  const min = (m) => sec(m * 60);
+  const words = { words: 20, chars: 100, images: 0, specific: 2, observation: false, generic: false, repeat: false };
+  const code = {
+    path: "cc2",
+    cwd: "/home/x/game",
+    title: null,
+    events: [
+      { id: "q1", t: min(0), kind: "prompt", prompt: words }, // at the computer
+      { id: "r1", t: min(2), kind: "agent", tools: [], stop: true },
+      { id: "q2", t: min(10), kind: "prompt", prompt: words }, // from the phone
+      { id: "r2", t: min(12.5), kind: "agent", tools: ["Bash"], ms: 30_000 }, // allowed from the phone at 12
+      { id: "r3", t: min(14), kind: "agent", tools: [], stop: true },
+      { id: "q3", t: sec(30 * 60 + 10), kind: "prompt", prompt: words }, // back at the computer, sent right away
+      { id: "r4", t: min(31), kind: "agent", tools: [], stop: true },
+    ],
+  };
+  const attention = [
+    { t: min(0), kind: "here" },
+    { t: min(2.5), kind: "away" }, // the last touch
+    { t: min(11), kind: "wait", session: "cc2" },
+    // Noticed at the next check, stamped at the last touch before it: the key that sent q3.
+    { t: sec(30 * 60 + 10), kind: "back", away_secs: 30 * 60 + 10 - 150 },
+  ];
+  const sig = signalsOf(attention, [code]);
+  assert.deepEqual(sig.away, [[min(2.5), sec(30 * 60 + 10)]]);
+  assert.deepEqual(sig.remote, [[min(11), min(12)]], "allowing the tool from the phone");
+  assert.deepEqual(sig.extra, [], "not counted as deciding at the computer");
+
+  const projects = buildReport([code], { days: null, now: sec(10 * 86400) });
+  const m = checkinMoments(projects, [code], [
+    { t: min(9.5), answer: "working" }, // writing the phone prompt
+    { t: min(9.6), answer: "none" }, // the question showed on the computer, nobody saw it
+    { t: min(11.5), answer: "working" }, // deciding on the phone
+    { t: min(27), answer: "other" }, // really away: q3 was typed at the computer
+  ], sig);
+  assert.deepEqual(
+    m.map((x) => [x.covered ?? false, x.signals ?? null]),
+    [
+      [true, 1],
+      [false, null],
+      [true, 1],
+      [true, 0],
+    ],
+  );
+  assert.deepEqual(m.map((x) => x.steer), [1, 1, 0, 1], "steer now counts the phone prompt and the time away alike");
+  const a = accuracy([m]);
+  assert.equal(a.signals.answers, 3, "the check-in nobody could answer is left out");
+  assert.equal(a.signals.ways.find((w) => w.key === "signals").whenOn, 1);
+  assert.equal(a.signals.ways.find((w) => w.key === "signals").whenOff, 0);
+  assert.match(renderAccuracy(a), /from a phone or another computer still count/);
+}
+
 console.log("counting tests passed");

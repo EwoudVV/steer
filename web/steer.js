@@ -1395,7 +1395,7 @@ export function checkinMoments(projects, sessions, checkins, signals = null) {
   const counted = projects
     .flatMap((p) => p.sessions.flatMap((s) => s.turns.map((u) => ({ u, path: s.path }))))
     .filter(({ u }) => u.human > 0)
-    .map(({ u, path }) => [u.t - u.human * 1000, u.t, path]);
+    .map(({ u, path }) => [u.t - u.human * 1000, u.t, path, u.kind]);
   const times = sessions.flatMap((s) => s.events.map((e) => e.t)).sort((a, b) => a - b);
   /** How many event times are at or before t. */
   const upTo = (t) => {
@@ -1422,10 +1422,17 @@ export function checkinMoments(projects, sessions, checkins, signals = null) {
     };
     // The counting that uses the attention signals, only where they were being measured.
     if (signals && inside(signals.known, c.t)) {
-      m.covered = true;
-      const before = counted.some(([from, to, path]) => !signals.chats.has(path) && c.t >= from && c.t <= to);
-      m.signals = !inside(signals.away, c.t) && (before || inside(signals.extra, c.t)) ? 1 : 0;
-      m.running = inside(signals.agentRuns, c.t);
+      // The turns this moment counts toward. Browser chats are counted from their signals.
+      const turns = counted.filter(([from, to, path]) => !signals.chats.has(path) && c.t >= from && c.t <= to);
+      // A turn ended by something sent from a phone or another computer: the idle timer
+      // only sees this computer, so it doesn't mean they were away.
+      const remote = turns.some(([, to, , kind]) => REMOTE_KINDS.has(kind) && remoteAt(signals.away, to)) || inside(signals.remote, c.t);
+      // The question shows on the computer, so nobody could have answered it there.
+      if (!(remote && c.answer === "none")) {
+        m.covered = true;
+        m.signals = remote || (!inside(signals.away, c.t) && (turns.length > 0 || inside(signals.extra, c.t))) ? 1 : 0;
+        m.running = inside(signals.agentRuns, c.t);
+      }
     }
     return m;
   });
@@ -1445,6 +1452,15 @@ const FOCUS_MAX = 30 * 60_000;
 const TYPING_MAX = 15 * 60_000;
 /** A turn with no end in the log: the agent counts as working at most this long. */
 const TURN_MAX = 30 * 60_000;
+/** Something done through the agent while nobody touched the computer was done from a
+ * phone or another computer (remote control, T3 Code, ssh). An away stretch starts at the
+ * last touch, which can be the key that sent a prompt, and the touch that ends it can be
+ * up to 15 seconds after they really came back, so it has to fall this far inside. */
+const REMOTE_AFTER = 5_000;
+const REMOTE_BEFORE = 20_000;
+/** What in a turn can come from another device. Evidence (saves, commands you ran,
+ * commits) happens on this computer. */
+const REMOTE_KINDS = new Set(["prompt", "interrupt", "rejected", "shell", "command"]);
 
 /** [from, to] ranges sorted and joined where they overlap. */
 function mergeRanges(ranges) {
@@ -1461,6 +1477,11 @@ function inside(ranges, t) {
   return ranges.some(([a, b]) => t >= a && t <= b);
 }
 
+/** Whether t is well inside an away stretch, so it wasn't done at this computer. */
+function remoteAt(away, t) {
+  return away.some(([a, b]) => t >= a + REMOTE_AFTER && t <= b - REMOTE_BEFORE);
+}
+
 /**
  * What the attention signals say, as time ranges, from a person's stored signal events
  * (away, back, here, wait, focus, typing) and their sessions:
@@ -1468,6 +1489,8 @@ function inside(ranges, t) {
  * - away: when they weren't
  * - extra: time the signals show was theirs (deciding on a permission prompt, a chat tab
  *   in front, writing a chat message)
+ * - remote: deciding on a permission prompt from a phone or another computer, which
+ *   counts even though nobody touched this one
  * - chats: the browser chat sessions, which are counted from their signals alone
  * - agentRuns: when an agent was working on something they asked for
  */
@@ -1490,16 +1513,20 @@ export function signalsOf(events, sessions) {
     }
   }
   if (awayFrom !== null) away.push([awayFrom, awayFrom + AWAY_OPEN]);
+  const awayRanges = mergeRanges(away);
 
   const bySession = new Map(sessions.map((s) => [s.path, s]));
   const extra = [];
+  const remote = [];
   const chats = new Set();
   for (const e of sorted) {
     if (e.kind === "wait") {
       // Deciding: until the tool started (the yes), or whatever the session did next.
       const next = bySession.get(e.session)?.events.find((x) => x.t > e.t);
       const end = next ? (Number.isFinite(next.ms) ? next.t - next.ms : next.t) : e.t;
-      extra.push([e.t, Math.min(Math.max(end, e.t), e.t + DECIDE_MAX)]);
+      const deciding = [e.t, Math.min(Math.max(end, e.t), e.t + DECIDE_MAX)];
+      // Answered while nobody touched the computer: from a phone or another computer.
+      (next && remoteAt(awayRanges, end) ? remote : extra).push(deciding);
     } else if (e.kind === "typing") {
       chats.add(e.session);
       const sent = bySession.get(e.session)?.events.find((x) => x.kind === "prompt" && x.t >= e.t);
@@ -1536,11 +1563,11 @@ export function signalsOf(events, sessions) {
     if (from !== null) agentRuns.push([from, Math.min(from + TURN_MAX, s.events[s.events.length - 1].t)]);
   }
 
-  const awayRanges = mergeRanges(away);
   return {
     known: mergeRanges([...known, ...awayRanges]),
     away: awayRanges,
     extra: mergeRanges(extra),
+    remote: mergeRanges(remote),
     chats,
     agentRuns: mergeRanges(agentRuns),
   };
@@ -1660,7 +1687,7 @@ ${a.ways
 /** The part of the accuracy page about counting with the attention signals. */
 function renderSignals(sig, pct, points) {
   let html = `<h2>With the new signals</h2>
-<p>Since steer 0.5.4, steer also knows when nobody's at the computer (its idle timer), when a permission prompt is waiting on the person, and when a ChatGPT or Claude tab is in front. Counted with those: the same as now, minus time away from the computer, plus deciding on permission prompts, and browser chats counted from the tab being in front and from writing each message. The agent working by itself still counts zero. It isn't what steer counts yet. It's here to see whether it's closer.</p>
+<p>Since steer 0.5.4, steer also knows when nobody's at the computer (its idle timer), when a permission prompt is waiting on the person, and when a ChatGPT or Claude tab is in front. Counted with those: the same as now, minus time away from the computer, plus deciding on permission prompts, and browser chats counted from the tab being in front and from writing each message. Prompts and answers sent from a phone or another computer still count, since the idle timer only sees the computer steer runs on, and check-ins nobody could answer because they were on another device are left out. The agent working by itself still counts zero. It isn't what steer counts yet. It's here to see whether it's closer.</p>
 `;
   if (!sig) return html + `<p>No answers yet from while these were being measured.</p>\n`;
   html += `<p><b>${sig.answers} ${sig.answers === 1 ? "answer" : "answers"} from ${sig.people} ${sig.people === 1 ? "person" : "people"}</b> while they were being measured. People said they were working at ${pct(sig.truth)} of these moments.${sig.people < 15 ? " That's too few to tell which one is closer yet." : ""}</p>

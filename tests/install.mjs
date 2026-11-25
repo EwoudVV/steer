@@ -5,7 +5,8 @@
 
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { generateKeyPairSync } from "node:crypto";
+import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
@@ -28,6 +29,20 @@ mkdirSync(join(home, "proj"));
 const env = { ...process.env, HOME: home, USERPROFILE: home, STEER_NO_BROWSER: "1", STEER_SANDBOX: "1" };
 for (const k of ["STEER_HOME", "CODEX_HOME", "COPILOT_HOME", "XDG_DATA_HOME", "XDG_CONFIG_HOME", "ZDOTDIR", "STEER_NO_UPDATE", "HCA_CLIENT_ID", "HCA_CLIENT_SECRET"]) delete env[k];
 env.STEER_RELEASES = `http://127.0.0.1:${RELEASES_PORT}/releases`;
+
+// The fake release below is signed with a test key by the same script the release
+// workflow uses. steer only takes this key because STEER_RELEASES is set too.
+const { publicKey, privateKey } = generateKeyPairSync("ed25519");
+env.STEER_RELEASE_KEY = publicKey.export({ type: "spki", format: "der" }).subarray(-32).toString("hex");
+const signed = mkdtempSync(join(tmpdir(), "steer-signed-"));
+const names = ["steer-macos-arm64", "steer-macos-x64", "steer-linux-x64", "steer-linux-arm64", "steer-windows-x64.exe"];
+for (const name of names) copyFileSync(built, join(signed, name));
+const signing = spawnSync(process.execPath, ["tools/sign-release.mjs", "999.0.0", ...names.map((n) => join(signed, n))], {
+  env: { ...process.env, STEER_SIGNING_KEY: privateKey.export({ type: "pkcs8", format: "pem" }) },
+  encoding: "utf8",
+});
+assert.equal(signing.status, 0, signing.stderr);
+let badSig = false;
 
 // Chrome is "installed", so install registers steer for the browser extension. (Windows
 // keeps that in the registry, which STEER_SANDBOX leaves alone.)
@@ -69,11 +84,18 @@ async function until(what, check, ms = 15_000) {
   assert.fail(`timed out waiting for ${what}`);
 }
 
-// A fake github.com/EwoudVV/steer/releases. The download is just this same build.
+// A fake github.com/EwoudVV/steer/releases. The download is just this same build, with
+// the signatures made above (or a wrong one while badSig is on).
 let latest = null;
 const releases = createServer((req, res) => {
+  const name = req.url.split("/").pop();
   if (req.url === "/releases/latest") {
     res.writeHead(302, { location: `http://127.0.0.1:${RELEASES_PORT}/releases/tag/v${latest}` }).end();
+  } else if (req.url.startsWith(`/releases/download/v${latest}/steer-`) && name.endsWith(".sig")) {
+    const sig = join(signed, name);
+    if (badSig) res.writeHead(200).end("ab".repeat(64));
+    else if (latest === "999.0.0" && existsSync(sig)) res.writeHead(200).end(readFileSync(sig));
+    else res.writeHead(404).end();
   } else if (req.url.startsWith(`/releases/download/v${latest}/steer-`)) {
     res.writeHead(200, { "content-type": "application/octet-stream" }).end(readFileSync(built));
   } else {
@@ -243,6 +265,11 @@ try {
   // Windows means renaming its own exe, and restarts the watcher.
   latest = "999.0.0";
   assert.match(await steer(bin, ["doctor"], { allowFail: true }), /steer 999\.0\.0 is out, run steer update/);
+  // A download whose signature doesn't check out against the release key stays out.
+  badSig = true;
+  assert.match(await steer(bin, ["update"], { allowFail: true }), /isn't signed with steer's release key/);
+  assert.equal((await steer(bin, ["version"])).trim(), version, "the old steer is still the one installed");
+  badSig = false;
   assert.match(await steer(bin, ["update"]), new RegExp(`updated steer from ${version.split(" ")[1].replaceAll(".", "\\.")} to 999\\.0\\.0`));
   assert.equal((await steer(bin, ["version"])).trim(), version, "the swapped in steer runs");
   const leftovers = readdirSync(join(steerDir, "bin")).filter((f) => f.startsWith("steer-new-"));
@@ -280,4 +307,5 @@ try {
   await sleep(500);
   rmSync(home, { recursive: true, force: true });
   rmSync(data, { recursive: true, force: true });
+  rmSync(signed, { recursive: true, force: true });
 }

@@ -167,6 +167,8 @@ assert.deepEqual(checks(reportOf([session("normal", honest())])), []);
   const p = analyzePrompt(`why does this crash <pasted_content id="1">${trace}</pasted_content>`, 0);
   assert.equal(p.words, 4);
   assert.ok(p.specific <= p.words + 2);
+  // Newer Claude Code puts the id on the closing tag too.
+  assert.equal(analyzePrompt(`why does this crash <pasted_content id="2">${trace}</pasted_content id="2"> help`, 0).words, 5);
   assert.equal(analyzePrompt("fix the jump", 0).words, 3);
 }
 

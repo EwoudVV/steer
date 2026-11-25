@@ -130,17 +130,18 @@ fn is_camel(w: &str) -> bool {
     cs.windows(2).any(|p| p[0].is_lowercase() && p[1].is_uppercase())
 }
 
-/// Claude Code's hook wraps pasted text in <pasted_content ...>...</pasted_content>.
+/// Claude Code's hook wraps pasted text in <pasted_content ...>...</pasted_content>, and
+/// newer versions put the id on the closing tag too: </pasted_content id="...">.
 /// Pasting takes no typing, so only the rest counts for words and typing time. Same as
 /// typedPart in web/steer.js.
 pub fn typed_part(text: &str) -> String {
-    const CLOSE: &str = "</pasted_content>";
     let mut out = String::new();
     let mut rest = text;
     while let Some(start) = rest.find("<pasted_content") {
-        let Some(end) = rest[start..].find(CLOSE).map(|e| start + e) else { break };
+        let Some(close) = rest[start..].find("</pasted_content").map(|e| start + e) else { break };
+        let Some(end) = rest[close..].find('>').map(|e| close + e + 1) else { break };
         out.push_str(&rest[..start]);
-        rest = &rest[end + CLOSE.len()..];
+        rest = &rest[end..];
     }
     out.push_str(rest);
     out
@@ -158,6 +159,10 @@ mod tests {
         assert_eq!(p.chars, "why does this crash ".chars().count());
         assert!(p.typing_secs() <= 5 + 1);
         assert!(p.specific <= p.words as u32 + 2, "never more file names than typed words");
+        // Newer Claude Code puts the id on the closing tag too.
+        let newer = PromptInfo::analyze(&format!("why does this crash <pasted_content id=\"2\">{trace}</pasted_content id=\"2\"> help"), 0);
+        assert_eq!(newer.words, 5);
+        assert_eq!(typed_part("a <pasted_content id=\"1\">x</pasted_content> b <pasted_content id=\"2\">y</pasted_content id=\"2\"> c"), "a  b  c");
         // Without the marker, everything is typing like before.
         assert_eq!(PromptInfo::analyze("fix the jump", 0).words, 3);
     }

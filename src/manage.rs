@@ -377,6 +377,45 @@ fn releases() -> String {
     std::env::var("STEER_RELEASES").unwrap_or_else(|_| "https://github.com/EwoudVV/steer/releases".into())
 }
 
+/// The public half of the key every release is signed with (tools/sign-release.mjs, run
+/// by the release workflow). An update only goes in if its signature checks out against
+/// this, so someone who got into the GitHub account or the download still can't ship a
+/// steer of their own to everyone.
+const RELEASE_KEY: &str = "5dc658551d0ca34469a8757a7f434876312f0e9d31ff4cca8a38f5d1a9270a66";
+
+/// The key updates are checked against. STEER_RELEASE_KEY only counts together with
+/// STEER_RELEASES, so tests can serve their own signed builds, and steer's own GitHub
+/// releases always get checked against the key above.
+fn release_key() -> Vec<u8> {
+    let other = std::env::var("STEER_RELEASES").is_ok().then(|| std::env::var("STEER_RELEASE_KEY").ok()).flatten();
+    other.and_then(|k| from_hex(&k)).filter(|k| k.len() == 32).unwrap_or_else(|| from_hex(RELEASE_KEY).unwrap())
+}
+
+/// What gets signed for one file of one release: the version, the file's name and its
+/// SHA-256. So a signature for an old version, or for another system's file, doesn't pass.
+fn release_message(version: &str, asset: &str, bytes: &[u8]) -> String {
+    let hash = ring::digest::digest(&ring::digest::SHA256, bytes);
+    format!("steer-release v{version} {asset} sha256:{}", to_hex(hash.as_ref()))
+}
+
+/// True when `sig` (hex) is `key`'s signature of this exact version and file.
+fn signed_by(key: &[u8], version: &str, asset: &str, bytes: &[u8], sig: &str) -> bool {
+    let Some(sig) = from_hex(sig.trim()) else { return false };
+    let key = ring::signature::UnparsedPublicKey::new(&ring::signature::ED25519, key);
+    key.verify(release_message(version, asset, bytes).as_bytes(), &sig).is_ok()
+}
+
+fn to_hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+fn from_hex(s: &str) -> Option<Vec<u8>> {
+    if s.len() % 2 != 0 || !s.bytes().all(|c| c.is_ascii_hexdigit()) {
+        return None;
+    }
+    (0..s.len()).step_by(2).map(|i| u8::from_str_radix(&s[i..i + 2], 16).ok()).collect()
+}
+
 /// The file name of this system's build on the GitHub release.
 fn asset() -> Option<&'static str> {
     Some(match (std::env::consts::OS, std::env::consts::ARCH) {
@@ -414,8 +453,8 @@ fn latest_version() -> Result<String, String> {
         .ok_or_else(|| format!("couldn't read a version from {location}"))
 }
 
-/// Downloads `version` and swaps it into ~/.steer/bin. If the download looks wrong or
-/// doesn't start, the current steer is left alone.
+/// Downloads `version` and swaps it into ~/.steer/bin. If the download isn't signed with
+/// steer's release key, looks wrong or doesn't start, the current steer is left alone.
 fn install_version(version: &str) -> Result<(), String> {
     let asset = asset().ok_or("there's no build of steer for this system")?;
     let url = format!("{}/download/v{version}/{asset}", releases());
@@ -425,6 +464,18 @@ fn install_version(version: &str) -> Result<(), String> {
     resp.into_reader().take(64 << 20).read_to_end(&mut bytes).map_err(|e| format!("download broke off: {e}"))?;
     if bytes.len() < 200_000 {
         return Err(format!("the file at {url} is too small to be steer"));
+    }
+    let sig = agent
+        .get(&format!("{url}.sig"))
+        .call()
+        .ok()
+        .and_then(|r| {
+            let mut s = String::new();
+            r.into_reader().take(1024).read_to_string(&mut s).ok().map(|_| s)
+        })
+        .unwrap_or_default();
+    if !signed_by(&release_key(), version, asset, &bytes, &sig) {
+        return Err(format!("steer {version} isn't signed with steer's release key, so it wasn't installed"));
     }
 
     let target = live::bin_path();
@@ -675,5 +726,26 @@ mod tests {
     #[test]
     fn every_release_target_has_a_file() {
         assert!(asset().is_some());
+    }
+
+    #[test]
+    fn updates_need_the_release_key_signature() {
+        use ring::signature::{Ed25519KeyPair, KeyPair};
+        let pair = Ed25519KeyPair::from_seed_unchecked(&[7; 32]).unwrap();
+        let key = pair.public_key().as_ref().to_vec();
+        let file = b"pretend this is steer".to_vec();
+        let good = to_hex(pair.sign(release_message("1.2.3", "steer-linux-x64", &file).as_bytes()).as_ref());
+        assert!(signed_by(&key, "1.2.3", "steer-linux-x64", &file, &good));
+        assert!(signed_by(&key, "1.2.3", "steer-linux-x64", &file, &format!("{good}\n")), "a newline at the end is fine");
+        let mut changed = file.clone();
+        changed[0] ^= 1;
+        assert!(!signed_by(&key, "1.2.3", "steer-linux-x64", &changed, &good), "a changed file");
+        assert!(!signed_by(&key, "9.9.9", "steer-linux-x64", &file, &good), "an old release's signature under a new version");
+        assert!(!signed_by(&key, "1.2.3", "steer-macos-arm64", &file, &good), "another system's file");
+        assert!(!signed_by(&key, "1.2.3", "steer-linux-x64", &file, ""), "no signature");
+        assert!(!signed_by(&key, "1.2.3", "steer-linux-x64", &file, "not hex"));
+        let someone = Ed25519KeyPair::from_seed_unchecked(&[8; 32]).unwrap();
+        assert!(!signed_by(someone.public_key().as_ref(), "1.2.3", "steer-linux-x64", &file, &good), "someone else's key");
+        assert_eq!(from_hex(RELEASE_KEY).map(|k| k.len()), Some(32), "the built in key is a real ed25519 key");
     }
 }

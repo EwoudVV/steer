@@ -565,6 +565,7 @@ name = "steer"
 version = "0.5.9"
 dependencies = [
  "chrono",
+ "ring",
  "rusqlite",
  "serde_json",
  "ureq",

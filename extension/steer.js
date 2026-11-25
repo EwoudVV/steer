@@ -24,7 +24,8 @@ const utf8 = new TextEncoder();
 const words = (s) => s.split(/\s+/).filter(Boolean);
 
 /**
- * Claude Code's hook wraps pasted text in <pasted_content ...>...</pasted_content>.
+ * Claude Code's hook wraps pasted text in <pasted_content ...>...</pasted_content>, and
+ * newer versions put the id on the closing tag too: </pasted_content id="...">.
  * Pasting takes no typing, so only the rest counts for words and typing time. Same as
  * typed_part in src/prompt.rs.
  */
@@ -34,10 +35,12 @@ export function typedPart(text) {
   for (;;) {
     const start = rest.indexOf("<pasted_content");
     if (start < 0) break;
-    const end = rest.indexOf("</pasted_content>", start);
+    const close = rest.indexOf("</pasted_content", start);
+    if (close < 0) break;
+    const end = rest.indexOf(">", close);
     if (end < 0) break;
     out += rest.slice(0, start);
-    rest = rest.slice(end + "</pasted_content>".length);
+    rest = rest.slice(end + 1);
   }
   return out + rest;
 }

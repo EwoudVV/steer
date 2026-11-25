@@ -15,7 +15,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - run: cargo test --locked
-      - run: node --check server/server.mjs && node --check web/steer.js && node --check web/report.js && node --check web/copy.js
+      - run: node --check server/server.mjs && node --check web/steer.js && node --check web/report.js && node --check web/copy.js && node --check tools/sign-release.mjs
       - run: node tests/login.mjs
       - run: node tests/counting.mjs
       - run: node tests/extension.mjs

@@ -218,6 +218,10 @@ pub(crate) fn refresh() -> Option<String> {
 
 /// For `steer doctor`: each editor found, and whether the extension is in it.
 pub(crate) fn status() -> Vec<(&'static str, bool)> {
+    // Setup leaves the editors alone in the sandbox, so doctor doesn't ask for it either.
+    if std::env::var_os("STEER_SANDBOX").is_some() {
+        return Vec::new();
+    }
     editors().into_iter().map(|(name, _)| (name, has_extension(name))).collect()
 }
 

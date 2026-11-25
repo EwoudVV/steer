@@ -134,6 +134,8 @@ while you use an ai tool, steer asks "what are you doing right now?" once at a r
 
 the watcher checks github for a new version once a day and swaps it in by itself. that check only asks github which version is newest, nothing about you gets sent. to turn it off, make a file at `~/.steer/no-update` (or set `STEER_NO_UPDATE`) and run `steer update` when you want to.
 
+since 0.6.0 every release is signed, and steer only swaps in a new version if its signature checks out against the key built into steer. so even someone who got into the github account couldn't push a fake update to everyone. the release workflow signs with [tools/sign-release.mjs](tools/sign-release.mjs). the install script itself still trusts https, like most install scripts.
+
 the website also has a drop-a-folder version of the report that runs in your browser.
 
 ## hosting cost

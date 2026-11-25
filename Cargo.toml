@@ -7,6 +7,9 @@ description = "tracks how much time you spend working with ai agents"
 
 [dependencies]
 chrono = { version = "0.4", default-features = false, features = ["std", "clock"] }
+# Checks that an update was signed with steer's release key. Already in the build through
+# ureq's TLS, so this adds nothing new.
+ring = { version = "0.17", default-features = false }
 rusqlite = { version = "0.43.0", features = ["bundled"] }
 serde_json = "1"
 ureq = { version = "2", default-features = false, features = ["tls"] }

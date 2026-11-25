@@ -7,36 +7,101 @@
 <title>steer</title>
 <link rel="stylesheet" href="style.css">
 <script type="module" src="copy.js"></script>
+<style>
+main{max-width:720px;padding:20px 16px 56px}
+body{font-size:15px;line-height:1.55}
+.nav{display:flex;justify-content:space-between;margin:0 0 28px}
+.nav b{font-size:17px}
+.nav span a{margin-left:14px}
+.intro{font-size:17px;line-height:1.5;margin:0 0 10px}
+h2{margin-top:36px}
+blockquote{margin:10px 0;padding:2px 0 2px 14px;border-left:3px solid #000}
+blockquote p{margin:6px 0}
+.why td:nth-child(1){white-space:nowrap}
+.why td:nth-child(4){white-space:nowrap;text-align:right}
+.why tr.flow td{background:#fff0f0}
+.q{margin:20px 0 4px;color:#555}
+.q + p{margin-top:0}
+.changes td:first-child{white-space:nowrap;padding-right:14px}
+.changes td{border:0;padding:3px 0;vertical-align:top}
+.changes{margin:6px 0}
+.foot{margin-top:40px;padding-top:10px;border-top:1px solid #000}
+#install{margin:8px 0}
+</style>
 </head>
 <body>
 <main>
-<h1>steer <a class="top" href="/me">your steer</a></h1>
-<p>steer tracks the time you spend working with ai coding agents. the time the agent runs by itself doesnt count, only what you do around it, like writing prompts, reading what it did, testing and fixing stuff. i made it for hack club's ai time tracking bounty, so ysws programs can count hours on projects made with ai.</p>
+<p class="nav"><b>steer</b><span><a href="/me">your steer</a><a href="https://github.com/EwoudVV/steer">github</a></span></p>
 
-<div class="strip big" title="one session: black is me, gray is the agent, red is dark flow"><span class="blk" style="flex-grow:143"><i class="h" style="flex-grow:5"></i><i class="a" style="flex-grow:138"></i></span><span class="blk" style="flex-grow:160"><i class="h" style="flex-grow:134"></i><i class="a" style="flex-grow:26"></i></span><span class="blk" style="flex-grow:156"><i class="h" style="flex-grow:125"></i><i class="a" style="flex-grow:31"></i></span><span class="blk" style="flex-grow:341"><i class="h" style="flex-grow:293"></i><i class="a" style="flex-grow:48"></i></span><span class="blk" style="flex-grow:338"><i class="h" style="flex-grow:120"></i><i class="a" style="flex-grow:218"></i></span><span class="blk" style="flex-grow:145"><i class="h" style="flex-grow:121"></i><i class="a" style="flex-grow:24"></i></span><span class="blk" style="flex-grow:33"><i class="h" style="flex-grow:33"></i><i class="a" style="flex-grow:0"></i></span><span class="blk" style="flex-grow:371"><i class="h" style="flex-grow:0"></i><i class="a" style="flex-grow:371"></i></span><span class="blk" style="flex-grow:330"><i class="h" style="flex-grow:300"></i><i class="a" style="flex-grow:30"></i></span><span class="blk" style="flex-grow:46"><i class="h" style="flex-grow:33"></i><i class="a" style="flex-grow:13"></i></span><span class="blk" style="flex-grow:371"><i class="h" style="flex-grow:120"></i><i class="a" style="flex-grow:251"></i></span><span class="blk" style="flex-grow:256"><i class="h" style="flex-grow:240"></i><i class="a" style="flex-grow:16"></i></span><span class="blk" style="flex-grow:375"><i class="h" style="flex-grow:120"></i><i class="a" style="flex-grow:255"></i></span><span class="blk" style="flex-grow:161"><i class="h" style="flex-grow:145"></i><i class="a" style="flex-grow:16"></i></span><span class="blk" style="flex-grow:64"><i class="h" style="flex-grow:39"></i><i class="a" style="flex-grow:25"></i></span><span class="blk" style="flex-grow:300"><i class="h" style="flex-grow:111"></i><i class="a" style="flex-grow:189"></i></span><span class="blk" style="flex-grow:426"><i class="h" style="flex-grow:229"></i><i class="a" style="flex-grow:197"></i></span><span class="blk" style="flex-grow:409"><i class="h" style="flex-grow:122"></i><i class="a" style="flex-grow:287"></i></span><span class="blk" style="flex-grow:367"><i class="h" style="flex-grow:247"></i><i class="a" style="flex-grow:120"></i></span><span class="blk" style="flex-grow:96"><i class="h" style="flex-grow:68"></i><i class="a" style="flex-grow:28"></i></span><span class="blk" style="flex-grow:121"><i class="h" style="flex-grow:73"></i><i class="a" style="flex-grow:48"></i></span><span class="blk" style="flex-grow:62"><i class="h" style="flex-grow:50"></i><i class="a" style="flex-grow:12"></i></span><span class="blk" style="flex-grow:180"><i class="h" style="flex-grow:127"></i><i class="a" style="flex-grow:53"></i></span><span class="blk" style="flex-grow:90"><i class="h" style="flex-grow:58"></i><i class="a" style="flex-grow:32"></i></span><span class="blk" style="flex-grow:118"><i class="h" style="flex-grow:51"></i><i class="a" style="flex-grow:67"></i></span><span class="blk" style="flex-grow:75"><i class="h" style="flex-grow:51"></i><i class="a" style="flex-grow:24"></i></span><span class="blk" style="flex-grow:580"><i class="h" style="flex-grow:363"></i><i class="a" style="flex-grow:217"></i></span><span class="blk" style="flex-grow:151"><i class="h" style="flex-grow:140"></i><i class="a" style="flex-grow:11"></i></span><span class="blk" style="flex-grow:334"><i class="h" style="flex-grow:198"></i><i class="a" style="flex-grow:136"></i></span><span class="blk" style="flex-grow:173"><i class="h" style="flex-grow:145"></i><i class="a" style="flex-grow:28"></i></span><span class="blk" style="flex-grow:240"><i class="h" style="flex-grow:120"></i><i class="a" style="flex-grow:120"></i></span><span class="blk" style="flex-grow:140"><i class="h" style="flex-grow:140"></i><i class="a" style="flex-grow:0"></i></span><span class="blk" style="flex-grow:907"><i class="h" style="flex-grow:0"></i><i class="a" style="flex-grow:907"></i></span><span class="blk" style="flex-grow:308"><i class="h" style="flex-grow:300"></i><i class="a" style="flex-grow:8"></i></span><span class="blk" style="flex-grow:94"><i class="h" style="flex-grow:8"></i><i class="a" style="flex-grow:86"></i></span><span class="blk" style="flex-grow:170"><i class="h" style="flex-grow:120"></i><i class="a" style="flex-grow:50"></i></span><span class="blk" style="flex-grow:566"><i class="h" style="flex-grow:294"></i><i class="a" style="flex-grow:272"></i></span><span class="blk" style="flex-grow:265"><i class="h" style="flex-grow:234"></i><i class="a" style="flex-grow:31"></i></span><span class="blk" style="flex-grow:637"><i class="h" style="flex-grow:144"></i><i class="a" style="flex-grow:493"></i></span><span class="blk" style="flex-grow:248"><i class="h" style="flex-grow:198"></i><i class="a" style="flex-grow:50"></i></span><span class="blk" style="flex-grow:384"><i class="h" style="flex-grow:56"></i><i class="a" style="flex-grow:328"></i></span><span class="blk" style="flex-grow:426"><i class="h" style="flex-grow:300"></i><i class="a" style="flex-grow:126"></i></span><span class="blk" style="flex-grow:190"><i class="h" style="flex-grow:120"></i><i class="a" style="flex-grow:70"></i></span><span class="blk" style="flex-grow:261"><i class="h flow" style="flex-grow:75"></i><i class="a" style="flex-grow:186"></i></span><span class="blk" style="flex-grow:400"><i class="h flow" style="flex-grow:120"></i><i class="a" style="flex-grow:280"></i></span><span class="blk" style="flex-grow:292"><i class="h flow" style="flex-grow:136"></i><i class="a" style="flex-grow:156"></i></span><span class="blk" style="flex-grow:166"><i class="h flow" style="flex-grow:156"></i><i class="a" style="flex-grow:10"></i></span><span class="blk" style="flex-grow:155"><i class="h flow" style="flex-grow:43"></i><i class="a" style="flex-grow:112"></i></span><span class="blk" style="flex-grow:521"><i class="h flow" style="flex-grow:124"></i><i class="a" style="flex-grow:397"></i></span><span class="blk" style="flex-grow:186"><i class="h" style="flex-grow:125"></i><i class="a" style="flex-grow:61"></i></span><span class="blk" style="flex-grow:188"><i class="h" style="flex-grow:67"></i><i class="a" style="flex-grow:121"></i></span><span class="blk" style="flex-grow:156"><i class="h" style="flex-grow:129"></i><i class="a" style="flex-grow:27"></i></span><span class="blk" style="flex-grow:163"><i class="h" style="flex-grow:30"></i><i class="a" style="flex-grow:133"></i></span><span class="blk" style="flex-grow:183"><i class="h" style="flex-grow:178"></i><i class="a" style="flex-grow:5"></i></span><span class="blk" style="flex-grow:200"><i class="h" style="flex-grow:103"></i><i class="a" style="flex-grow:97"></i></span><span class="blk" style="flex-grow:174"><i class="h" style="flex-grow:156"></i><i class="a" style="flex-grow:18"></i></span><span class="blk" style="flex-grow:147"><i class="h" style="flex-grow:125"></i><i class="a" style="flex-grow:22"></i></span><span class="blk" style="flex-grow:45"><i class="h" style="flex-grow:22"></i><i class="a" style="flex-grow:23"></i></span><span class="blk" style="flex-grow:58"><i class="h" style="flex-grow:40"></i><i class="a" style="flex-grow:18"></i></span><span class="blk" style="flex-grow:51"><i class="h" style="flex-grow:38"></i><i class="a" style="flex-grow:13"></i></span><span class="blk" style="flex-grow:44"><i class="h" style="flex-grow:17"></i><i class="a" style="flex-grow:27"></i></span><span class="blk" style="flex-grow:33"><i class="h" style="flex-grow:30"></i><i class="a" style="flex-grow:3"></i></span><span class="blk" style="flex-grow:26"><i class="h" style="flex-grow:7"></i><i class="a" style="flex-grow:19"></i></span><span class="blk" style="flex-grow:87"><i class="h" style="flex-grow:17"></i><i class="a" style="flex-grow:70"></i></span><span class="blk" style="flex-grow:227"><i class="h" style="flex-grow:167"></i><i class="a" style="flex-grow:60"></i></span><span class="blk" style="flex-grow:350"><i class="h" style="flex-grow:120"></i><i class="a" style="flex-grow:230"></i></span><span class="blk" style="flex-grow:239"><i class="h" style="flex-grow:16"></i><i class="a" style="flex-grow:223"></i></span><span class="blk" style="flex-grow:137"><i class="h" style="flex-grow:121"></i><i class="a" style="flex-grow:16"></i></span><span class="blk" style="flex-grow:124"><i class="h" style="flex-grow:116"></i><i class="a" style="flex-grow:8"></i></span><span class="blk" style="flex-grow:110"><i class="h" style="flex-grow:95"></i><i class="a" style="flex-grow:15"></i></span><span class="blk" style="flex-grow:221"><i class="h" style="flex-grow:200"></i><i class="a" style="flex-grow:21"></i></span><span class="blk" style="flex-grow:2196"><i class="h" style="flex-grow:99"></i><i class="a" style="flex-grow:2097"></i></span><span class="blk" style="flex-grow:133"><i class="h" style="flex-grow:5"></i><i class="a" style="flex-grow:128"></i></span><span class="blk" style="flex-grow:984"><i class="h" style="flex-grow:135"></i><i class="a" style="flex-grow:849"></i></span><span class="blk" style="flex-grow:601"><i class="h" style="flex-grow:120"></i><i class="a" style="flex-grow:481"></i></span><span class="blk" style="flex-grow:329"><i class="h" style="flex-grow:178"></i><i class="a" style="flex-grow:151"></i></span><span class="blk" style="flex-grow:183"><i class="h" style="flex-grow:163"></i><i class="a" style="flex-grow:20"></i></span><span class="blk" style="flex-grow:138"><i class="h" style="flex-grow:120"></i><i class="a" style="flex-grow:18"></i></span><span class="blk" style="flex-grow:194"><i class="h" style="flex-grow:68"></i><i class="a" style="flex-grow:126"></i></span><span class="blk" style="flex-grow:146"><i class="h" style="flex-grow:132"></i><i class="a" style="flex-grow:14"></i></span><span class="blk" style="flex-grow:53"><i class="h" style="flex-grow:34"></i><i class="a" style="flex-grow:19"></i></span><span class="blk" style="flex-grow:275"><i class="h" style="flex-grow:120"></i><i class="a" style="flex-grow:155"></i></span><span class="blk" style="flex-grow:221"><i class="h" style="flex-grow:188"></i><i class="a" style="flex-grow:33"></i></span><span class="blk" style="flex-grow:221"><i class="h" style="flex-grow:99"></i><i class="a" style="flex-grow:122"></i></span><span class="blk" style="flex-grow:532"><i class="h" style="flex-grow:173"></i><i class="a" style="flex-grow:359"></i></span><span class="blk" style="flex-grow:125"><i class="h" style="flex-grow:125"></i><i class="a" style="flex-grow:0"></i></span></div>
-<p class="muted">thats one of my sessions on steer itself, 2h 42m of me and 3h 26m of claude code. black is me, gray is the agent working by itself, and red is me sending "continue" over and over without testing anything, where only the typing counts. its from <a href="/r/a5t3Rd_gdBPo">this review page</a>. my total on steer so far: <img class="badge" src="/badge/duck/ai_tracker.svg" alt="steered with ai"></p>
+<p class="intro">steer counts how much of your ai coding time is actually you. it watches claude code, codex, copilot, cursor and the others while you work, and counts what you do yourself, like writing prompts, reading what the agent did and testing it. the agent working by itself counts as zero.</p>
+<p>i started it on nov 19, the day after zrl posted the ai time tracking bounty. the idea is that ysws programs can count ai hours properly instead of cutting them all to a third. about 10 people use it so far and some things are still rough, theres a list of those further down.</p>
 
-<h2>how to use it</h2>
-<ol class="steps">
-<li><p>paste this into a terminal. it tells you what it found and what its going to change, and asks first. then you sign in with your hack club account.</p>
+<h2>install</h2>
+<p>paste this into a terminal. it tells you what it found and what its going to change, and asks before doing anything. then you sign in with your hack club account and it runs in the background.</p>
 <div id="install">
-<p data-os="unix" class="muted">mac and linux:</p>
 <div class="cmd" data-os="unix"><pre><code>curl -fsSL https://steer.duck.hackclub.app/install.sh | sh</code></pre></div>
-<p data-os="windows" class="muted">windows, in powershell:</p>
 <div class="cmd" data-os="windows"><pre><code>irm https://steer.duck.hackclub.app/install.ps1 | iex</code></pre></div>
-</div></li>
-<li><p>work like you normally do. it picks up claude code, codex, opencode, copilot, cursor and freebuff, typing in vs code and cursor, and chatgpt and claude in the browser with <a href="https://github.com/EwoudVV/steer#chatgpt-and-claude-in-the-browser">the browser extension</a>. your page updates while you work.</p></li>
-<li><p>when you ship a project, go to <a href="/me">your steer</a> and hit submit next to it. it freezes the hours into a review page and gives you a line to paste into the hours field.</p></li>
-</ol>
+</div>
+<p>your page at steer.duck.hackclub.app/u/your-name updates while you work. when you ship a project, sign in at <a href="/me">your steer</a> and hit submit. you get a review page for the program, and a line to paste into the hours field.</p>
 
-<h2>for reviewers and ysws programs</h2>
-<p>every submitted project gets a review page that doesnt change after its made. it has the hours, a written justification, checks, every session, and the commits checked against github, so you can check the hours without asking the person anything. fraud squad and program reviewers sign in on the page to approve, cut or reject them.</p>
-<p>what steer checks and what it doesnt catch is on <a href="/trust">/trust</a>, and how close its numbers are to what people say they were doing is on <a href="/accuracy">/accuracy</a>. if you run a ysws and want to use it, dm me on the hack club slack, im duck.</p>
+<h2>what it made from my own work</h2>
+<p>this is from the review page for steer itself, frozen on nov 21. its what a reviewer reads:</p>
+<blockquote>
+<p>steer counted 3h 09m of duck's own time on ai_tracker from Nov 20, 2026 to Nov 21, 2026, over 2 days and 4 sessions with an AI agent. That's the time spent writing 103 prompts, reading and testing what the agent did, and changing code by hand. The 4h 06m the agent ran by itself isn't counted.</p>
+<p>35% of the prompts named files or code, and 17% came after testing (a screenshot, a description of what happened, or a command run first). 25% were short ones like "continue", which count at most 2 minutes each.</p>
+</blockquote>
+<p>and every prompt on it says why it got its time. a few of mine:</p>
+<div class="scroll">
+<table class="why">
+<tr><th>Time (UTC)</th><th>Prompt</th><th>Why</th><th>Counted</th></tr>
+<tr><td>Nov 20 12:47</td><td>9 words</td><td>back after a break: 2m + typing</td><td>2m</td></tr>
+<tr><td>Nov 20 19:43</td><td>298 words</td><td>56s since your last action</td><td>56s</td></tr>
+<tr class="flow"><td>Nov 20 19:55</td><td>25 words</td><td>dark flow: repeat prompt in a run of 6, typing only</td><td>30s</td></tr>
+<tr><td>Nov 21 15:39</td><td>8 words</td><td>replied 0s after the agent stopped + 2m watching</td><td>2m</td></tr>
+<tr><td>Nov 21 15:49</td><td>4 words</td><td>6m after the agent stopped, counts 4m</td><td>4m</td></tr>
+<tr><td>Nov 21 22:29</td><td>3 words</td><td>short prompt 27m after the agent stopped, counts 2m</td><td>2m</td></tr>
+</table>
+</div>
+<p><a href="/r/a5t3Rd_gdBPo">the whole review page</a>, with every session, the commits checked against github, and every event behind it. what steer checks and what it doesnt catch is on <a href="/trust">/trust</a>.</p>
 
-<h2>privacy</h2>
-<p>prompt text and code never leave your computer, steer only sends counts and times, and it doesnt record your screen. everything it sends is listed on <a href="/privacy">/privacy</a>. your page is public like a hackatime profile, and you can delete your account from your steer page whenever you want.</p>
+<h2>stuff people asked me</h2>
+<p class="q">"wait would this send my own prompts to you? and my entire sessions?"</p>
+<p>no, your prompts never leave your computer. steer reads them there to count a few things, like how many words or if it mentions a file or an error, and only sends those counts and when it happened. for sessions it sends that the agent used a tool, which one and how long it ran, never what it did. it does send your project's folder name, and your page is public. everything it sends is on <a href="/privacy">/privacy</a>.</p>
+<p class="q">"if i test it, can i request for my data to be deleted?"</p>
+<p>yes. sign in at <a href="/me">your steer</a> and hit delete account, that takes everything off the server. <code>steer uninstall</code> takes it off your computer.</p>
+<p class="q">"does it support opencode? is it the gui too or only the terminal?"</p>
+<p>both, the desktop app and the terminal one use the same database and steer reads that. it also does codex, claude code, cursor, copilot in vs code and the cli, freebuff, and chatgpt and claude in the browser with <a href="https://github.com/EwoudVV/steer#chatgpt-and-claude-in-the-browser">the extension</a>.</p>
+<p class="q">"can we test without using ai to code?"</p>
+<p>no, it only tracks time when youre using an ai tool. coding without ai is what hackatime is for.</p>
+<p class="q">"can i stresstest this with like 20 agents at a time"</p>
+<p>sure. your time still only counts once, no matter how many agents are running.</p>
+<p class="q">"how is prompts after you tested something calculated?"</p>
+<p>its how many of your prompts said what happened when you tried something, like an error or what the app did. steer checks that on your computer and only sends that it did, not what it said.</p>
 
-<p class="foot muted"><a href="https://github.com/EwoudVV/steer">code on github</a> &middot; if something seems off run <code>steer doctor</code> &middot; <code>steer uninstall</code> takes it all out &middot; <a href="/report">see your old claude code logs</a> without installing anything</p>
+<h2>whats not good yet</h2>
+<ul>
+<li>it misses real work. on 135 check-ins from 4 people, steer counted about 4 in 10 of the moments people said they were working. most of what it misses is reading the agent's answer and coding by hand between prompts. the vs code and cursor extension is the start of fixing that, and the counting it feeds shows up next to the current one on your steer. the numbers are on <a href="/accuracy">/accuracy</a>.</li>
+<li>it cant see you reading copilot chat inside vs code yet, and copilot's inline suggestions just look like you typing.</li>
+<li>someone could still script fake events with their own key. the server stamps every event when it arrives and review pages check commits against github, so its harder, but not impossible.</li>
+</ul>
+
+<h2>what changed</h2>
+<table class="changes">
+<tr><td>nov 24</td><td>0.5.8: opencode 2.4 started saving tool calls somewhere new, so steer had missed them since nov 23. it reads both now</td></tr>
+<tr><td>nov 24</td><td>your steer page, so you can submit for review and delete your account without the terminal</td></tr>
+<tr><td>nov 24</td><td>0.5.7: the vs code and cursor extension</td></tr>
+<tr><td>nov 24</td><td>0.5.6: steer.dino.icu as a second address, for when hackclub.app is blocked</td></tr>
+<tr><td>nov 23</td><td>0.5.5: "waiting on the ai" is its own check-in button</td></tr>
+<tr><td>nov 23</td><td>0.5.3: the accuracy page</td></tr>
+<tr><td>nov 23</td><td>0.5.0: chatgpt and claude in the browser</td></tr>
+<tr><td>nov 22</td><td>0.4.2: freebuff. 0.4.1: fixed what the red team found</td></tr>
+<tr><td>nov 21</td><td>0.4.0: review pages</td></tr>
+<tr><td>nov 20</td><td>0.3.3: check-ins, and a cap of 12h a day and 60h a week</td></tr>
+<tr><td>nov 19</td><td>first version</td></tr>
+</table>
+<p class="muted">all 68 commits are on <a href="https://github.com/EwoudVV/steer/commits/main">github</a>.</p>
+
+<p class="foot">made by duck. if something breaks, or you run a ysws and want to use steer, dm me on the hack club slack. if it seems off on your computer, run <code>steer doctor</code>, and <code>steer uninstall</code> takes it all out. got old claude code logs? <a href="/report">see them without installing anything</a>.</p>
 </main>
 </body>
 </html>

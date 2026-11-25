@@ -203,7 +203,7 @@ try {
     ev({ kind: "checkin", via: "steer", answer: "working", answered_after: 3 }),
     ev({ kind: "checkin", via: "steer", answer: "waiting", answered_after: 2 }),
     // The editor in front with the project open, from the same extension since 0.5.9.
-    ev({ kind: "front", via: "steer", app: "cursor", secs: 90, t: iso(Date.now() - 5 * 60_000) }),
+    ev({ kind: "front", via: "steer", app: "cursor", secs: 90, t: iso(Date.now() - 3 * 60_000) }),
     // A stretch of working in the project's files, from the VS Code and Cursor extension.
     // (Earlier than the check-ins above, so it doesn't make them count as measured.)
     ev({ kind: "editor", via: "steer", app: "vscode", secs: 60, t: iso(Date.now() - 4 * 60_000), folder: "/home/someone/game" }),

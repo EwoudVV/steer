@@ -298,8 +298,8 @@ pub(crate) fn enqueue(events: &[Value]) -> Option<()> {
     }
     fs::create_dir_all(dir()).ok()?;
     // When an AI tool was last used, for check-ins and the idle timer (which don't count
-    // as use themselves, and neither does working in an editor).
-    if events.iter().any(|e| !matches!(e["kind"].as_str(), Some("checkin" | "away" | "back" | "here" | "editor"))) {
+    // as use themselves, and neither does working in an editor or having it in front).
+    if events.iter().any(|e| !matches!(e["kind"].as_str(), Some("checkin" | "away" | "back" | "here" | "editor" | "front"))) {
         let now = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
         let _ = fs::write(dir().join("last-activity"), now.to_string());
     }

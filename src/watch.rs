@@ -81,6 +81,9 @@ pub fn run() -> i32 {
         if let Some(msg) = live::refresh_hooks() {
             eprintln!("steer: {msg}");
         }
+        if let Some(msg) = crate::editor::refresh() {
+            eprintln!("steer: {msg}");
+        }
     }
 
     loop {

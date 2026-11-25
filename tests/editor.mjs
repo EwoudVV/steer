@@ -10,7 +10,15 @@ import { join } from "node:path";
 const home = mkdtempSync(join(tmpdir(), "steer-editor-"));
 process.env.STEER_HOME = home;
 const file = join(home, "editor", `${process.pid}.jsonl`);
-const lines = () => (existsSync(file) ? readFileSync(file, "utf8").trim().split("\n").filter(Boolean).map((l) => JSON.parse(l)) : []);
+const frontFile = join(home, "editor-front", `${process.pid}.jsonl`);
+const read = (f) => (existsSync(f) ? readFileSync(f, "utf8").trim().split("\n").filter(Boolean).map((l) => JSON.parse(l)) : []);
+const lines = () => read(file);
+const fronts = () => read(frontFile);
+
+// The extension checks every 15 seconds; here the test runs those checks by hand.
+let check = () => {};
+globalThis.setInterval = (fn) => ((check = fn), 0);
+globalThis.clearInterval = () => {};
 
 let clock = Date.parse("2026-11-24T18:00:00Z");
 Date.now = () => clock;
@@ -26,12 +34,14 @@ const vscode = {
   TextEditorSelectionChangeKind: { Keyboard: 1, Mouse: 2, Command: 3 },
   window: {
     state: { focused: true },
+    activeTextEditor: undefined,
     onDidChangeTextEditorSelection: on("selection"),
     onDidChangeTextEditorVisibleRanges: on("scroll"),
     onDidChangeActiveTextEditor: on("active"),
     onDidChangeWindowState: on("window"),
   },
   workspace: {
+    workspaceFolders: undefined,
     getWorkspaceFolder: (uri) => (uri.scheme === "file" && uri.fsPath.startsWith("/home/x/game/") ? { uri: { fsPath: "/home/x/game" } } : undefined),
   },
 };
@@ -132,6 +142,68 @@ try {
 
   // Only the folder, times and editor: nothing about files or what was typed.
   for (const l of lines()) assert.deepEqual(Object.keys(l).sort(), ["app", "end", "folder", "start"]);
+  assert.deepEqual(fronts(), [], "no project in front so far, so nothing about the window being in front");
+
+  // The window in front with a project open, in its own file: reading an agent's answer
+  // in its chat or in the terminal doesn't touch a file.
+  vscode.env.appName = "Visual Studio Code";
+  stop = start();
+  const t0 = clock;
+  const iso = (t) => new Date(t).toISOString();
+  vscode.window.activeTextEditor = { document: main };
+  listeners.window({ focused: true });
+  tick(15);
+  check();
+  tick(15);
+  check();
+  tick(10);
+  vscode.window.state.focused = false;
+  listeners.window({ focused: false });
+  assert.deepEqual(fronts(), [{ folder: "/home/x/game", start: iso(t0), end: iso(t0 + 40_000), app: "vscode" }], "until another window came to the front");
+
+  // With no file open it's the only folder open, and with several folders and no file
+  // it can't tell which project, so nothing.
+  vscode.window.activeTextEditor = undefined;
+  vscode.workspace.workspaceFolders = [{ uri: { fsPath: "/home/x/game" } }, { uri: { fsPath: "/home/x/essay" } }];
+  vscode.window.state.focused = true;
+  listeners.window({ focused: true });
+  tick(30);
+  check();
+  listeners.window({ focused: false });
+  assert.equal(fronts().length, 1);
+  vscode.workspace.workspaceFolders = [{ uri: { fsPath: "/home/x/game" } }];
+  listeners.window({ focused: true });
+  tick(15);
+  check();
+  listeners.window({ focused: false });
+  assert.equal(fronts().at(-1).folder, "/home/x/game");
+
+  // The computer sleeping in between ends it at the last check before.
+  const t1 = clock;
+  listeners.window({ focused: true });
+  tick(15);
+  check();
+  tick(600);
+  check();
+  tick(15);
+  check();
+  listeners.window({ focused: false });
+  const slept = fronts().slice(-2);
+  assert.deepEqual(slept[0], { folder: "/home/x/game", start: iso(t1), end: iso(t1 + 15_000), app: "vscode" });
+  assert.equal(slept[1].start, iso(t1 + 615_000), "a new one from the first check after waking");
+
+  // Hours in front get written in 15 minute pieces.
+  listeners.window({ focused: true });
+  for (let i = 0; i < 80; i++) {
+    tick(15);
+    check();
+  }
+  listeners.window({ focused: false });
+  const pieces = fronts().slice(-2);
+  assert.equal(Date.parse(pieces[0].end) - Date.parse(pieces[0].start), 15 * 60_000);
+  assert.equal(pieces[1].start, pieces[0].end, "the next piece starts where the last one ended");
+  stop();
+  for (const l of fronts()) assert.deepEqual(Object.keys(l).sort(), ["app", "end", "folder", "start"]);
   console.log("editor tests passed");
 } finally {
   Module._load = load;

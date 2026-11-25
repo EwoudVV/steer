@@ -145,7 +145,7 @@ pub fn install(args: &[String]) -> Result<String, String> {
         let editors: Vec<&str> = crate::editor::status().into_iter().map(|(name, _)| name).collect();
         if !editors.is_empty() {
             println!(
-                "  - add a small steer extension to {}. it notes when you're typing, clicking or scrolling in a project's files, and for projects you use ai in, steer sends the project and the times (never file names or code)",
+                "  - add a small steer extension to {}. it notes when you're typing, clicking or scrolling in a project's files or have the editor in front, and for projects you use ai in, steer sends the project and the times (never file names or code)",
                 editors.join(" and ")
             );
         }

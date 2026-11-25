@@ -1490,7 +1490,8 @@ function remoteAt(away, t) {
  * - known: when steer could tell whether they were at the computer
  * - away: when they weren't
  * - extra: time the signals show was theirs (deciding on a permission prompt, a chat tab
- *   in front, writing a chat message, working in the project's files in VS Code or Cursor)
+ *   in front, writing a chat message, working in the project's files in VS Code or Cursor,
+ *   or the editor in front between agent runs)
  * - remote: deciding on a permission prompt from a phone or another computer, which
  *   counts even though nobody touched this one
  * - chats: the browser chat sessions, which are counted from their signals alone
@@ -1578,6 +1579,14 @@ export function signalsOf(events, sessions) {
       }
     }
     if (from !== null) agentRuns.push([from, Math.min(from + TURN_MAX, s.events[s.events.length - 1].t)]);
+  }
+
+  // The editor window in front with the project open: reading the agent's answer in its
+  // chat or in the terminal. Only outside the agent's runs, since watching it work isn't
+  // the person's time, and time away from the computer comes off later like for the rest.
+  const runs = mergeRanges(agentRuns);
+  for (const e of sorted) {
+    if (e.kind === "front") for (const range of subtract([[e.t, e.t + (e.secs ?? 0) * 1000]], runs)) add(extra, extraBy, e, range);
   }
 
   return {
@@ -1804,7 +1813,7 @@ ${a.ways
 /** The part of the accuracy page about counting with the attention signals. */
 function renderSignals(sig, pct, points, totals = null) {
   let html = `<h2>With the new signals</h2>
-<p>Since steer 0.5.4, steer also knows when nobody's at the computer (its idle timer), when a permission prompt is waiting on the person, and when a ChatGPT or Claude tab is in front. Since 0.5.7 its VS Code and Cursor extension also says when someone is typing, clicking or scrolling in a project's files. Counted with those: the same as now, minus time away from the computer, plus deciding on permission prompts, plus time working in the project's files, and browser chats counted from the tab being in front and from writing each message. Prompts and answers sent from a phone or another computer still count, since the idle timer only sees the computer steer runs on, and check-ins nobody could answer because they were on another device are left out. The agent working by itself still counts zero. It isn't what steer counts yet. It's here to see whether it's closer.</p>
+<p>Since steer 0.5.4, steer also knows when nobody's at the computer (its idle timer), when a permission prompt is waiting on the person, and when a ChatGPT or Claude tab is in front. Since 0.5.7 its VS Code and Cursor extension also says when someone is typing, clicking or scrolling in a project's files, and since 0.5.9 when the editor is in front with the project open. Counted with those: the same as now, minus time away from the computer, plus deciding on permission prompts, plus time working in the project's files, plus time with the editor in front while no agent is working (reading its answer in the chat or the terminal), and browser chats counted from the tab being in front and from writing each message. Prompts and answers sent from a phone or another computer still count, since the idle timer only sees the computer steer runs on, and check-ins nobody could answer because they were on another device are left out. The agent working by itself still counts zero. It isn't what steer counts yet. It's here to see whether it's closer.</p>
 `;
   if (!sig) return html + `<p>No answers yet from while these were being measured.</p>\n` + renderTotals(totals);
   html += `<p><b>${sig.answers} ${sig.answers === 1 ? "answer" : "answers"} from ${sig.people} ${sig.people === 1 ? "person" : "people"}</b> while they were being measured. People said they were working at ${pct(sig.truth)} of these moments.${sig.people < 15 ? " That's too few to tell which one is closer yet." : ""}</p>

@@ -1,8 +1,8 @@
 {
   "name": "steer-editor",
   "displayName": "steer",
-  "description": "tells steer when you're typing, clicking or scrolling in a project's files, so time you spend coding around the ai counts. only the project's name and the times leave your computer, never file names or code",
-  "version": "0.1.0",
+  "description": "tells steer when you're typing, clicking or scrolling in a project's files, or have the editor in front with a project open, so time you spend coding and reading around the ai counts. only the project's name and the times leave your computer, never file names or code",
+  "version": "0.2.0",
   "publisher": "steer",
   "license": "AGPL-3.0-or-later",
   "repository": {

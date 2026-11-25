@@ -522,4 +522,43 @@ assert.deepEqual(checks(reportOf([session("normal", honest())])), []);
   assert.match(renderAccuracy(a), /Per person: \+\d+%, -20%\./);
 }
 
+// The editor in front (0.5.9): reading the agent's answer in its chat or the terminal.
+// It counts only while no agent is working, and not while away from the computer.
+{
+  const min = (m) => sec(m * 60);
+  const words = { words: 20, chars: 100, images: 0, specific: 2, observation: false, generic: false, repeat: false };
+  const code = {
+    path: "cc5",
+    cwd: "/home/x/game",
+    title: null,
+    events: [
+      { id: "f1", t: min(0), kind: "prompt", prompt: words },
+      { id: "f2", t: min(5), kind: "agent", tools: [], stop: true },
+      { id: "f3", t: min(40), kind: "prompt", prompt: words },
+      { id: "f4", t: min(41), kind: "agent", tools: [], stop: true },
+    ],
+  };
+  const attention = [
+    { t: min(0), kind: "here", project: "presence" },
+    { t: min(5), kind: "here", project: "presence" },
+    { t: min(10), kind: "here", project: "presence" },
+    { t: min(2), kind: "front", secs: 15 * 60, project: "game" }, // in front from 2 to 17
+    { t: min(12), kind: "away", project: "presence" }, // gone from 12 ...
+    { t: min(14), kind: "back", away_secs: 120, project: "presence" }, // ... to 14
+  ];
+  const sig = signalsOf(attention, [code]);
+  assert.ok(sig.extra.some(([a, b]) => a === min(5) && b === min(17)), "from when the agent stopped");
+  assert.ok(!sig.extra.some(([a]) => a < min(5)), "not while it was working");
+  const projects = buildReport([code], { days: null, now: sec(10 * 86400) });
+  const now = projectHuman(projects[0]);
+  const game = signalTotals(projects, sig).projects.find((p) => projectKey(p.name) === "game");
+  assert.equal(game.secs, now + 10 * 60, "12 minutes reading, minus 2 away");
+  const m = checkinMoments(projects, [code], [
+    { t: min(3), answer: "waiting" }, // the agent working, the editor in front
+    { t: min(8), answer: "working" }, // reading what it did
+    { t: min(13), answer: "other" }, // away
+  ], sig);
+  assert.deepEqual(m.map((x) => [x.steer, x.signals]), [[0, 0], [0, 1], [0, 0]]);
+}
+
 console.log("counting tests passed");

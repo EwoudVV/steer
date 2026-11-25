@@ -1,12 +1,14 @@
 //! VS Code and Cursor. steer's extension for them (editor/) writes the stretches of time
-//! someone worked in a project's files to ~/.steer/editor/<window>.jsonl: the folder, when
-//! it started and ended, and which editor. The watcher turns each one into an "editor"
-//! event with just the project's name and the times, and only for projects an AI tool was
-//! used in around then, since coding without AI is Hackatime's job. Folder paths, file
-//! names and code never leave the computer.
+//! someone worked in a project's files to ~/.steer/editor/<window>.jsonl, and since 0.5.9
+//! the stretches the window was in front with a project open to ~/.steer/editor-front:
+//! the folder, when it started and ended, and which editor. The watcher turns each one
+//! into an "editor" or "front" event with just the project's name and the times, and only
+//! for projects an AI tool was used in around then, since coding without AI is
+//! Hackatime's job. Folder paths, file names and code never leave the computer.
 //!
 //! `steer setup` puts the extension in with the editors' own command line tools
-//! (`code --install-extension`), from a .vsix made here out of editor/.
+//! (`code --install-extension`), from a .vsix made here out of editor/. After an update
+//! with a newer extension, the watcher puts the new one in where the old one is.
 
 use crate::live::{dir, event, home, new_id, project_name};
 use chrono::{DateTime, Utc};
@@ -34,15 +36,29 @@ const CLI_TIMEOUT: Duration = Duration::from_secs(120);
 
 /// Called by the watcher every few seconds. `state` keeps how far each file was read.
 pub(crate) fn poll(state: &mut Map<String, Value>) -> Vec<Value> {
-    poll_dir(&dir().join("editor"), state, &crate::evidence::used_projects(), &project_name, Utc::now())
+    let (used, now) = (crate::evidence::used_projects(), Utc::now());
+    let mut out = poll_dir(&dir().join("editor"), "", "editor", state, &used, &project_name, now);
+    out.extend(poll_dir(&dir().join("editor-front"), "front/", "front", state, &used, &project_name, now));
+    out
 }
 
-fn poll_dir(folder: &Path, state: &mut Map<String, Value>, used: &HashMap<String, i64>, name_of: &dyn Fn(&str) -> String, now: DateTime<Utc>) -> Vec<Value> {
+/// Reads one folder of the extension's files. `kind` is what its stretches become, and
+/// `prefix` keeps their place in `state` apart from the other folder's.
+#[allow(clippy::too_many_arguments)]
+fn poll_dir(
+    folder: &Path,
+    prefix: &str,
+    kind: &str,
+    state: &mut Map<String, Value>,
+    used: &HashMap<String, i64>,
+    name_of: &dyn Fn(&str) -> String,
+    now: DateTime<Utc>,
+) -> Vec<Value> {
     let Ok(entries) = fs::read_dir(folder) else { return Vec::new() };
     let mut out = Vec::new();
     for entry in entries.flatten() {
         let path = entry.path();
-        let Some(name) = path.file_name().and_then(|n| n.to_str()).filter(|n| n.ends_with(".jsonl")).map(str::to_owned) else {
+        let Some(name) = path.file_name().and_then(|n| n.to_str()).filter(|n| n.ends_with(".jsonl")).map(|n| format!("{prefix}{n}")) else {
             continue;
         };
         let Ok(mut file) = fs::File::open(&path) else { continue };
@@ -56,7 +72,7 @@ fn poll_dir(folder: &Path, state: &mut Map<String, Value>, used: &HashMap<String
         if offset < len && file.seek(SeekFrom::Start(offset)).is_ok() {
             let _ = file.take(1_000_000).read_to_end(&mut new);
         }
-        let (events, read) = events_from(&new, used, name_of, now);
+        let (events, read) = events_from(&new, kind, used, name_of, now);
         out.extend(events);
         offset += read as u64;
         let old = entry.metadata().and_then(|m| m.modified()).ok().and_then(|t| t.elapsed().ok()).is_some_and(|age| age > OLD);
@@ -71,7 +87,7 @@ fn poll_dir(folder: &Path, state: &mut Map<String, Value>, used: &HashMap<String
 
 /// Events from the complete lines in `bytes`, and how many bytes those were. A last line
 /// without its newline is still being written, so it's left for next time.
-fn events_from(bytes: &[u8], used: &HashMap<String, i64>, name_of: &dyn Fn(&str) -> String, now: DateTime<Utc>) -> (Vec<Value>, usize) {
+fn events_from(bytes: &[u8], kind: &str, used: &HashMap<String, i64>, name_of: &dyn Fn(&str) -> String, now: DateTime<Utc>) -> (Vec<Value>, usize) {
     let complete = bytes.iter().rposition(|&b| b == b'\n').map_or(0, |i| i + 1);
     let events = bytes[..complete]
         .split(|&b| b == b'\n')
@@ -94,7 +110,7 @@ fn events_from(bytes: &[u8], used: &HashMap<String, i64>, name_of: &dyn Fn(&str)
             if (start.timestamp() - last_ai).abs() > REACH {
                 return None;
             }
-            let mut e = event(new_id(), "editor", &project, "steer", start, "editor");
+            let mut e = event(new_id(), "editor", &project, "steer", start, kind);
             e["secs"] = secs.into();
             e["app"] = app.into();
             Some(e)
@@ -157,6 +173,49 @@ fn has_extension(editor: &str) -> bool {
         .unwrap_or(false)
 }
 
+/// The extension's version in this build of steer.
+fn version() -> String {
+    serde_json::from_str::<Value>(PACKAGE).ok().and_then(|v| v["version"].as_str().map(str::to_owned)).unwrap_or_default()
+}
+
+/// "0.10.0" is newer than "0.9.1".
+fn older(a: &str, b: &str) -> bool {
+    let parts = |v: &str| v.split('.').map(|p| p.parse::<u32>().unwrap_or(0)).collect::<Vec<_>>();
+    parts(a) < parts(b)
+}
+
+/// The newest version of the extension an editor has, if it has it.
+fn installed_version(editor: &str) -> Option<String> {
+    let prefix = format!("{ID}-");
+    fs::read_dir(extensions_dir(editor))
+        .ok()?
+        .flatten()
+        .filter_map(|e| e.file_name().to_string_lossy().strip_prefix(&prefix).map(str::to_owned))
+        .max_by(|a, b| if older(a, b) { std::cmp::Ordering::Less } else if older(b, a) { std::cmp::Ordering::Greater } else { std::cmp::Ordering::Equal })
+}
+
+/// After an update with a newer extension, puts it in the editors that have an older one,
+/// so nobody has to run setup again. Editors without it (never added, or taken out) are
+/// left alone.
+pub(crate) fn refresh() -> Option<String> {
+    if std::env::var_os("STEER_SANDBOX").is_some() {
+        return None;
+    }
+    let new = version();
+    let stale: Vec<_> = editors().into_iter().filter(|(name, _)| installed_version(name).is_some_and(|v| older(&v, &new))).collect();
+    if stale.is_empty() {
+        return None;
+    }
+    let vsix = dir().join("steer-editor.vsix");
+    fs::create_dir_all(dir()).and_then(|()| fs::write(&vsix, build_vsix())).ok()?;
+    let updated: Vec<&str> = stale
+        .iter()
+        .filter(|(_, cli)| run(cli, &["--install-extension".as_ref(), vsix.as_os_str(), "--force".as_ref()]))
+        .map(|(name, _)| *name)
+        .collect();
+    (!updated.is_empty()).then(|| format!("updated the steer extension in {} to {new}", updated.join(" and ")))
+}
+
 /// For `steer doctor`: each editor found, and whether the extension is in it.
 pub(crate) fn status() -> Vec<(&'static str, bool)> {
     editors().into_iter().map(|(name, _)| (name, has_extension(name))).collect()
@@ -196,7 +255,7 @@ pub(crate) fn install(remove: bool) -> String {
         lines.push(if remove {
             format!("took the steer extension out of {}", done.join(" and "))
         } else {
-            format!("added the steer extension to {}. it notes when you're working in a project's files, and only the project and the times get sent", done.join(" and "))
+            format!("added the steer extension to {}. it notes when you're working in a project's files or have the editor in front, and only the project and the times get sent", done.join(" and "))
         });
     }
     if !failed.is_empty() {
@@ -232,7 +291,7 @@ fn run(cli: &Path, args: &[&std::ffi::OsStr]) -> bool {
 /// The extension as a .vsix: a zip with the extension's files under extension/ and two
 /// small files that say what's in it.
 pub(crate) fn build_vsix() -> Vec<u8> {
-    let version = serde_json::from_str::<Value>(PACKAGE).ok().and_then(|v| v["version"].as_str().map(str::to_owned)).unwrap_or_default();
+    let version = version();
     let manifest = format!(
         r#"<?xml version="1.0" encoding="utf-8"?>
 <PackageManifest Version="2.0.0" xmlns="http://schemas.microsoft.com/developer/vsx-schema/2011" xmlns:d="http://schemas.microsoft.com/developer/vsx-schema-design/2011">
@@ -383,7 +442,7 @@ mod tests {
             // still being written
             r#"{"folder":"/home/x/game","start":"2026-11-24T17:59:00.000Z""#,
         );
-        let (events, read) = events_from(lines.as_bytes(), &used, &name_of, now);
+        let (events, read) = events_from(lines.as_bytes(), "editor", &used, &name_of, now);
         assert_eq!(read, lines.rfind('\n').unwrap() + 1, "the unfinished last line is left for next time");
         assert_eq!(events.len(), 1);
         let e = &events[0];
@@ -411,13 +470,40 @@ mod tests {
         let second = line(20);
         fs::write(&file, format!("{}\n{}", line(10), &second[..30])).unwrap();
         let mut state = Map::new();
-        let first = poll_dir(&folder, &mut state, &used, &name_of, now);
+        let first = poll_dir(&folder, "", "editor", &mut state, &used, &name_of, now);
         assert_eq!(first.iter().map(|e| e["secs"].as_i64()).collect::<Vec<_>>(), [Some(10)]);
         // The window finishes writing the second line.
         fs::write(&file, format!("{}\n{second}\n", line(10))).unwrap();
-        let next = poll_dir(&folder, &mut state, &used, &name_of, now);
+        let next = poll_dir(&folder, "", "editor", &mut state, &used, &name_of, now);
         assert_eq!(next.iter().map(|e| e["secs"].as_i64()).collect::<Vec<_>>(), [Some(20)]);
-        assert!(poll_dir(&folder, &mut state, &used, &name_of, now).is_empty(), "nothing twice");
+        assert!(poll_dir(&folder, "", "editor", &mut state, &used, &name_of, now).is_empty(), "nothing twice");
+        // The same file name in the folder for the window being in front is read on its own.
+        let front = folder.join("front");
+        fs::create_dir_all(&front).unwrap();
+        fs::write(front.join("123.jsonl"), format!("{}\n", line(30))).unwrap();
+        let fronts = poll_dir(&front, "front/", "front", &mut state, &used, &name_of, now);
+        assert_eq!(fronts.iter().map(|e| (e["kind"].as_str(), e["secs"].as_i64())).collect::<Vec<_>>(), [(Some("front"), Some(30))]);
+        assert!(state.contains_key("123.jsonl") && state.contains_key("front/123.jsonl"));
         fs::remove_dir_all(&folder).unwrap();
+    }
+
+    #[test]
+    fn the_window_in_front_becomes_its_own_kind() {
+        let now = DateTime::parse_from_rfc3339("2026-11-24T18:00:00Z").unwrap().with_timezone(&Utc);
+        let used = HashMap::from([("game".to_owned(), now.timestamp() - 600)]);
+        let name_of = |f: &str| f.rsplit('/').next().unwrap_or_default().to_owned();
+        let line = concat!(r#"{"folder":"/home/x/game","start":"2026-11-24T17:50:00.000Z","end":"2026-11-24T17:54:00.000Z","app":"cursor"}"#, "\n");
+        let (events, _) = events_from(line.as_bytes(), "front", &used, &name_of, now);
+        assert_eq!(events.len(), 1);
+        assert_eq!((events[0]["kind"].as_str(), events[0]["secs"].as_i64(), events[0]["app"].as_str()), (Some("front"), Some(240), Some("cursor")));
+    }
+
+    #[test]
+    fn versions_compare_by_number() {
+        assert!(older("0.1.0", "0.2.0"));
+        assert!(older("0.9.1", "0.10.0"));
+        assert!(!older("0.2.0", "0.2.0"));
+        assert!(!older("1.0.0", "0.9.9"));
+        assert!(!version().is_empty());
     }
 }

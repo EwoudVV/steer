@@ -165,6 +165,10 @@ try {
     ev({ kind: "editor", via: "steer", app: "notepad", secs: 60 }),
     ev({ kind: "editor", via: "steer", app: "vscode", secs: 99_999 }),
     ev({ kind: "editor", via: "steer", app: "cursor", secs: 1.5 }),
+    // The editor in front: the same rules.
+    ev({ kind: "front", via: "copilot", app: "vscode", secs: 60 }),
+    ev({ kind: "front", via: "steer", app: "zed", secs: 60 }),
+    ev({ kind: "front", via: "steer", app: "cursor", secs: 3601 }),
     ev({ t: "1" }),
     ev({ t: 1763600000000 }),
     ev({ t: undefined }),
@@ -198,6 +202,8 @@ try {
     // The check-in buttons since 0.5.5.
     ev({ kind: "checkin", via: "steer", answer: "working", answered_after: 3 }),
     ev({ kind: "checkin", via: "steer", answer: "waiting", answered_after: 2 }),
+    // The editor in front with the project open, from the same extension since 0.5.9.
+    ev({ kind: "front", via: "steer", app: "cursor", secs: 90, t: iso(Date.now() - 5 * 60_000) }),
     // A stretch of working in the project's files, from the VS Code and Cursor extension.
     // (Earlier than the check-ins above, so it doesn't make them count as measured.)
     ev({ kind: "editor", via: "steer", app: "vscode", secs: 60, t: iso(Date.now() - 4 * 60_000), folder: "/home/someone/game" }),
@@ -213,6 +219,8 @@ try {
   assert.equal(stored[3].late, true, "10 minutes old arrives late");
   assert.equal(stored[8].late, true, "a minute ahead doesn't count");
   assert.equal(stored[9].late, true, "an hour ahead doesn't count");
+  const front = stored.at(-2);
+  assert.deepEqual([front.kind, front.app, front.secs], ["front", "cursor", 90]);
   const editor = stored.at(-1);
   assert.deepEqual([editor.kind, editor.app, editor.secs], ["editor", "vscode", 60]);
   assert.equal(editor.folder, undefined, "a folder path isn't kept even if something sends one");

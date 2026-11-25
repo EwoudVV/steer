@@ -221,7 +221,7 @@ function note(store, e) {
 
 const NAME = /^[a-z0-9][a-z0-9_-]{1,31}$/;
 const clean = (s, max) => (typeof s === "string" ? s.replace(/[\u0000-\u001f]/g, "").slice(0, max) : "");
-const KINDS = new Set(["prompt", "tool", "stop", "interrupt", "checkin", "run", "save", "commit", "wait", "focus", "copy", "typing", "away", "back", "here", "editor"]);
+const KINDS = new Set(["prompt", "tool", "stop", "interrupt", "checkin", "run", "save", "commit", "wait", "focus", "copy", "typing", "away", "back", "here", "editor", "front"]);
 // Evidence from the project, sent by steer's watcher and terminal lines: a command you ran
 // (its first word and exit code), that files were saved, a commit's hash.
 const EVIDENCE = new Set(["run", "save", "commit"]);
@@ -245,12 +245,14 @@ const INTERRUPTS = new Set(["codex", "copilot", "claude-code"]);
 //   5 minutes while someone's there, so a stretch with none of these is unknown
 // - "editor": from steer's VS Code and Cursor extension, a stretch of `secs` seconds from
 //   `t` someone was typing, clicking or scrolling in the project's files
-const ATTENTION = new Set(["wait", "focus", "copy", "typing", "away", "back", "here", "editor"]);
+// - "front": from the same extension, a stretch of `secs` seconds from `t` the editor
+//   window was in front with the project open
+const ATTENTION = new Set(["wait", "focus", "copy", "typing", "away", "back", "here", "editor", "front"]);
 const WAITS = { via: new Set(["claude-code", "codex", "cursor"]), reasons: new Set(["permission", "question"]) };
 const CHATS = new Set(["chatgpt", "claude-ai"]);
 const EDITORS = new Set(["vscode", "cursor"]);
 // Sent by steer itself rather than an AI tool.
-const FROM_STEER = new Set(["checkin", "run", "save", "commit", "away", "back", "here", "editor"]);
+const FROM_STEER = new Set(["checkin", "run", "save", "commit", "away", "back", "here", "editor", "front"]);
 // Permission settings a prompt can carry: Claude Code's modes and Codex's approval
 // policies. Says whether the agent could stop to ask the person at all.
 const MODES = new Set(["default", "plan", "acceptEdits", "auto", "dontAsk", "bypassPermissions", "never", "on-request", "on-failure", "untrusted"]);
@@ -276,7 +278,7 @@ function accept(raw, now) {
   if (kind === "wait" && (!WAITS.via.has(via) || !WAITS.reasons.has(raw.reason))) return null;
   if ((kind === "focus" || kind === "copy" || kind === "typing") && !CHATS.has(via)) return null;
   if (kind === "focus" && typeof raw.on !== "boolean") return null;
-  if (kind === "editor" && (!EDITORS.has(raw.app) || !Number.isInteger(raw.secs) || raw.secs < 0 || raw.secs > 3600)) return null;
+  if ((kind === "editor" || kind === "front") && (!EDITORS.has(raw.app) || !Number.isInteger(raw.secs) || raw.secs < 0 || raw.secs > 3600)) return null;
   if (kind === "checkin" && !ANSWERS.has(raw.answer)) return null;
   const t = typeof raw.t === "string" && TIME.test(raw.t) ? Date.parse(raw.t) : NaN;
   if (Number.isNaN(t)) return null;
@@ -343,7 +345,7 @@ function accept(raw, now) {
   }
   if (kind === "wait") e.reason = raw.reason;
   if (kind === "focus") e.on = raw.on;
-  if (kind === "editor") {
+  if (kind === "editor" || kind === "front") {
     e.secs = raw.secs;
     e.app = raw.app;
   }
@@ -1543,7 +1545,7 @@ ${installBox(req)}<p class="muted">Made a steer account before you could sign in
     }
     body += `</table>\n<p class="muted">Your time is what counts: writing prompts, reading what the agent did, testing and fixing things. Agent time is when it ran by itself.</p>\n`;
     if (both) {
-      body += `<p class="muted">New counting is what steer is testing next. It takes out time you were away from the computer, and adds time the VS Code or Cursor extension saw you working in the project's files, deciding on permission prompts and ChatGPT or Claude chats. It doesn't count toward anything yet. If one of the two is closer to what you actually did, tell duck on Slack, that helps decide which one steer keeps. How close each one is to people's check-ins is on <a href="/accuracy">/accuracy</a>.</p>\n`;
+      body += `<p class="muted">New counting is what steer is testing next. It takes out time you were away from the computer, and adds time the VS Code or Cursor extension saw you working in the project's files or reading with the editor in front between agent runs, deciding on permission prompts, and ChatGPT or Claude chats. It doesn't count toward anything yet. If one of the two is closer to what you actually did, tell duck on Slack, that helps decide which one steer keeps. How close each one is to people's check-ins is on <a href="/accuracy">/accuracy</a>.</p>\n`;
     }
   }
   const reviews = [...(users[name].reviews ?? [])].reverse();

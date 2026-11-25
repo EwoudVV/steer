@@ -107,7 +107,7 @@ pub fn render(projects: &[Project], opts: &Options) -> String {
     let _ = write!(
         h,
         r#"<h1>steer report</h1>
-<p>{sessions} in {projects}, {window}. Made from your Claude Code logs on this computer. Prompt text isn't included.</p>
+<p>{sessions} in {projects}, {window}. Made from your Claude Code logs on this computer. It never includes what your prompts said, only counts about them.</p>
 <table class="totals">
 <tr><th>Your time</th><td>{you}</td></tr>
 <tr><th>Agent time</th><td>{agent}</td></tr>

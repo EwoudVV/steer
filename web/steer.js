@@ -1137,7 +1137,7 @@ export function renderReport(
   let h = "";
 
   h += `<h2>Totals</h2>
-<p>${plural(sessions, "session")} in ${plural(projects.length, "project")}, ${esc(span)}. Made from ${esc(source)}. Prompt text isn't included.</p>
+<p>${plural(sessions, "session")} in ${plural(projects.length, "project")}, ${esc(span)}. Made from ${esc(source)}. It never includes what your prompts said, only counts about them.</p>
 <table class="totals">
 <tr><th>Your time</th><td>${fmtDur(human)}</td></tr>
 <tr><th>Agent time</th><td>${fmtDur(agent)}</td></tr>

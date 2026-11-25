@@ -46,6 +46,19 @@ writeFileSync(
     evil: { keyHashes: [sha256("evilkey")], created: "2026-11-19T00:00:00Z" },
   }),
 );
+// Programs that link to steer from their form. The last three have form addresses that
+// could send people to another site, so steer leaves them out.
+const programs = join(data, "programs.json");
+writeFileSync(
+  programs,
+  JSON.stringify({
+    fixit: { name: "Fix It", form: "https://forms.example.com/fixit?review={review}&hours={hours}&p={project}" },
+    plain: { name: "Plain", form: null },
+    sneaky: { name: "Sneaky", form: "https://{project}.example.com/form" },
+    insecure: { name: "Insecure", form: "http://forms.example.com/form?r={review}" },
+    typo: { name: "Typo", form: "https://forms.example.com/form?r={reveiw}" },
+  }),
+);
 
 const server = spawn("node", ["server/server.mjs"], {
   env: {
@@ -58,6 +71,7 @@ const server = spawn("node", ["server/server.mjs"], {
     HCA_BASE: `http://127.0.0.1:${FAKE_PORT}`,
     // U123 is also the account the review below belongs to.
     STEER_REVIEWERS: "UREVIEW1, UREVIEW2, U123",
+    STEER_PROGRAMS: programs,
   },
   stdio: "ignore",
 });
@@ -340,13 +354,13 @@ try {
   {
     const ip = { "x-forwarded-for": "10.5.5.5" };
     /** Signs in on the website as nextUser and returns the session cookie. */
-    const webSignIn = async () => {
-      const go = await fetch(`${STEER}/me/login`, { redirect: "manual", headers: ip });
+    const webSignIn = async (start = "/me/login", end = "/me") => {
+      const go = await fetch(`${STEER}${start}`, { redirect: "manual", headers: ip });
       assert.equal(go.status, 303);
       const back = await fetch(go.headers.get("location"), { redirect: "manual" });
       const done = await fetch(back.headers.get("location"), { redirect: "manual", headers: { cookie: cookieFrom(go, "steer_signin") } });
       assert.equal(done.status, 303);
-      assert.equal(done.headers.get("location"), "/me");
+      assert.equal(done.headers.get("location"), end, "the sign-in comes back where it started");
       return cookieFrom(done, "steer_session");
     };
     const get = async (path, cookie) => (await fetch(STEER + path, { headers: { cookie } })).text();
@@ -402,6 +416,37 @@ try {
     assert.ok((await get(`/me?made=${id}`, cookie)).includes(review.line), "the line to paste is on the page");
     assert.match(await get("/me/submit?project=kart", cookie), /value="https:\/\/github\.com\/duck\/kart"/, "next time the repo is filled in");
 
+    // A program's link from its submission form: sign in, pick the project, and go back
+    // to the program's form with the review page and hours in it.
+    assert.equal((await fetch(`${STEER}/submit/nope`)).status, 404, "only programs steer knows");
+    for (const bad of ["sneaky", "insecure", "typo"]) {
+      assert.equal((await fetch(`${STEER}/submit/${bad}`)).status, 404, `${bad}: a form address that could go somewhere else is left out`);
+    }
+    assert.match(await get("/submit/fixit", ""), /href="\/submit\/fixit\/login"/, "signed out, it asks you to sign in first");
+    const viaProgram = await webSignIn("/submit/fixit/login", "/submit/fixit");
+    assert.match(await get("/submit/fixit", viaProgram), /href="\/submit\/fixit\?project=kart"/, "you pick one of your own projects");
+    const fixitForm = await get("/submit/fixit?project=kart", viaProgram);
+    assert.match(fixitForm, /action="\/submit\/fixit"/);
+    const csrf3 = /name="csrf" value="([^"]+)"/.exec(fixitForm)[1];
+    assert.equal((await post("/submit/fixit", viaProgram, { csrf: csrf3, project: "kart" }, { origin: "https://evil.example" })).status, 403, "only from steer itself");
+    const sent = await post("/submit/fixit", viaProgram, { csrf: csrf3, project: "kart", repo: "" });
+    assert.equal(sent.status, 303);
+    const sentId = /^\/submit\/fixit\/done\?r=([A-Za-z0-9_-]{12})$/.exec(sent.headers.get("location"))[1];
+    const sentReview = (await json(`/api/r/${sentId}`)).body;
+    assert.equal(sentReview.program, "fixit", "the review page says which program it was made for");
+    const donePage = await get(`/submit/fixit/done?r=${sentId}`, viaProgram);
+    const toForm = /<a class="button" href="([^"]+)">Back to the Fix It form/.exec(donePage)[1].replaceAll("&amp;", "&");
+    assert.equal(toForm, `https://forms.example.com/fixit?review=${encodeURIComponent(sentReview.url)}&hours=${sentReview.hours}&p=kart`);
+    assert.equal((await fetch(`${STEER}/submit/fixit/done?r=${sentId}`, { redirect: "manual" })).status, 303, "only whoever made it gets the way back");
+    assert.match(await get(`/r/${sentId}`, ""), /Submitted to Fix It on \d{4}-\d{2}-\d{2}\./, "reviewers see what it was submitted to");
+    assert.match(await get("/me", viaProgram), /kart, for Fix It/);
+    // A program whose form address steer doesn't have yet gets what to paste instead.
+    const plain = await post("/submit/plain", viaProgram, { csrf: csrf3, project: "kart" });
+    assert.match(plain.headers.get("location"), /^\/submit\/plain\/done\?r=/);
+    const plainDone = await get(plain.headers.get("location"), viaProgram);
+    assert.ok(plainDone.includes(`${STEER}/r/`) && plainDone.includes("h tracked with steer, review: "), "the review page and the line to paste");
+    assert.ok(!plainDone.includes("Back to the"), "and no form to go back to");
+
     // Signing out.
     const out = await post("/me/logout", cookie, { csrf });
     assert.equal(out.headers.get("location"), "/");
@@ -422,7 +467,7 @@ try {
     assert.match(sure, /Type duck to confirm/);
     const csrf2 = /name="csrf" value="([^"]+)"/.exec(sure)[1];
     const reviews = (await json("/api/slack/U123")).body.accounts[0].reviews.map((r) => r.id);
-    assert.equal(reviews.length, 2);
+    assert.equal(reviews.length, 4);
     assert.equal((await post("/me/delete", again, { csrf: csrf2, confirm: "dcuk" })).status, 400, "the name has to match");
     assert.equal((await json("/api/u/duck")).status, 200);
     const gone = await post("/me/delete", again, { csrf: csrf2, confirm: " Duck " });

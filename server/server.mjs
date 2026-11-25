@@ -118,9 +118,60 @@ const COMMIT_CLOSE = 15 * 60 * 1000; // a commit's time on GitHub this close to 
 // Slack ids of people who can approve, cut or reject review pages: fraud squad and
 // program reviewers. Set on the server, comma separated.
 const REVIEWERS = new Set((process.env.STEER_REVIEWERS ?? "").split(",").map((s) => s.trim()).filter(Boolean));
+// Programs whose submission form links to /submit/<id>. People sign in there, pick the
+// project, and go back to the program's form with the review page and hours filled in.
+// They're listed in server/programs.json: a name, and the form's address with {review},
+// {hours}, {line}, {project} or {id} where those go, or null to show them for copying.
+const PROGRAM_ID = /^[a-z0-9-]{1,40}$/;
+const FORM_FIELDS = new Set(["review", "hours", "line", "project", "id"]);
+const PROGRAMS = isMainThread ? loadPrograms(process.env.STEER_PROGRAMS ?? join(here, "programs.json")) : new Map();
 const SLACK_ID = /^[UW][A-Z0-9]{2,20}$/;
 const eventsFile = (name) => join(DATA, "events", `${name}.jsonl`);
 const sha256 = (s) => createHash("sha256").update(s).digest("hex");
+
+/** Programs by id. One whose form address could send people to another site is left out. */
+function loadPrograms(file) {
+  const programs = new Map();
+  let listed;
+  try {
+    listed = JSON.parse(readFileSync(file, "utf8"));
+  } catch (e) {
+    if (e.code !== "ENOENT") console.error(`programs: can't read ${file}: ${e.message}`);
+    return programs;
+  }
+  for (const [id, p] of Object.entries(listed ?? {})) {
+    const name = typeof p?.name === "string" ? p.name.trim().slice(0, 60) : "";
+    const form = p?.form ?? null;
+    if (!PROGRAM_ID.test(id) || !name || (form !== null && !formOk(form))) {
+      console.error(`programs: left out ${id}, it needs a name, and a form that's null or an https address with only known {fields} after the host`);
+      continue;
+    }
+    programs.set(id, { id, name, form });
+  }
+  return programs;
+}
+
+/** True for an https address whose {fields} are all known and can't change which site it is. */
+function formOk(form) {
+  if (typeof form !== "string" || form.length > 2000) return false;
+  if (![...form.matchAll(/\{([^}]*)\}/g)].every((f) => FORM_FIELDS.has(f[1]))) return false;
+  try {
+    const a = new URL(form.replace(/\{[a-z]+\}/g, "a"));
+    const b = new URL(form.replace(/\{[a-z]+\}/g, "b"));
+    return a.protocol === "https:" && a.origin === b.origin && !a.username && !a.password;
+  } catch {
+    return false;
+  }
+}
+
+/** A program's form address with a review page's link and hours where the form wants them. */
+function fillForm(form, r) {
+  const values = { review: r.url, hours: r.hours, line: r.line, project: r.project, id: r.id };
+  return form.replace(/\{([a-z]+)\}/g, (_, k) => encodeURIComponent(values[k]));
+}
+
+/** A program's name, or its id once it isn't listed anymore. */
+const programName = (id) => PROGRAMS.get(id)?.name ?? id;
 
 /** Accounts by name. No prototype, so names like "constructor" are just names. */
 function loadUsers() {
@@ -1025,8 +1076,9 @@ async function hoursJson(res, name, project) {
  * Freezes a project's hours into a review page. `steer submit` and the submit form on
  * /me both end up here. Returns { review }, or { status, error } to show the person.
  */
-async function makeReview(name, { project, from = null, to = null, repo = null }) {
+async function makeReview(name, { project, from = null, to = null, repo = null, program = null }) {
   if (typeof project !== "string" || !project || project.length > 100) return { status: 400, error: "say which project" };
+  if (program !== null && !PROGRAMS.has(program)) return { status: 400, error: "steer doesn't know that program" };
   for (const d of [from, to]) {
     if (d !== null && (typeof d !== "string" || !DAY.test(d) || Number.isNaN(Date.parse(`${d}T00:00:00Z`)))) {
       return { status: 400, error: "days look like 2026-11-21" };
@@ -1063,6 +1115,8 @@ async function makeReview(name, { project, from = null, to = null, repo = null }
     last: r.last,
     frozen,
     repo,
+    // The program it was made for, when it came from that program's /submit link.
+    program,
     slack_id: info.slack,
     verified: info.verified,
     secs: r.secs,
@@ -1075,7 +1129,7 @@ async function makeReview(name, { project, from = null, to = null, repo = null }
   };
   mkdirSync(REVIEWS, { recursive: true });
   writeFileSync(reviewFile(id), JSON.stringify(review), { flag: "wx" });
-  users[name].reviews = [...(users[name].reviews ?? []), { id, project: review.project, hours: r.hours, frozen }].slice(-500);
+  users[name].reviews = [...(users[name].reviews ?? []), { id, project: review.project, hours: r.hours, frozen, ...(program ? { program } : {}) }].slice(-500);
   saveUsers();
   return { review };
 }
@@ -1354,8 +1408,9 @@ function reviewPage(req, res, id) {
   const u = encodeURIComponent(r.user);
   // The sign-in goes at the top: a review page is long, and reviewers are who it's for.
   const signIn = who ? "" : `<p class="muted">Fraud squad or a program reviewer? <a href="/reviewer/login?r=${id}">Sign in to approve, cut or reject these hours</a>.</p>\n`;
+  const forProgram = r.program ? `<p>Submitted to ${esc(programName(r.program))} on ${esc(day(r.frozen))}.</p>\n` : "";
   const body = `<h1>Review: <a href="/u/${u}">${esc(r.user)}</a> / <a href="/u/${u}/${encodeURIComponent(r.project)}">${esc(r.project)}</a></h1>
-${signIn}${decisionsHtml(r, decisionsOf(id), who)}${r.html}
+${forProgram}${signIn}${decisionsHtml(r, decisionsOf(id), who)}${r.html}
 <p class="muted">Every event behind this page, with when the server got it: <a href="/api/r/${id}/events">/api/r/${id}/events</a>. How steer catches faked time: <a href="/trust">/trust</a>.</p>`;
   page(res, `review · ${r.user} / ${r.project}`, body, who ? { csp: PAGE_CSP.replace("form-action 'none'", "form-action 'self'") } : {});
 }
@@ -1552,7 +1607,8 @@ ${installBox(req)}<p class="muted">Made a steer account before you could sign in
   if (reviews.length) {
     body += `<h2>Submitted</h2>\n<table class="list">\n<tr><th>Made</th><th>Project</th><th class="r">Hours</th><th>Review</th><th>Page</th></tr>\n`;
     for (const r of reviews) {
-      body += `<tr><td>${esc(day(r.frozen))}</td><td>${esc(r.project)}</td><td class="r">${esc(r.hours)}</td><td>${reviewStatus(r.id)}</td><td><a href="/r/${r.id}">/r/${r.id}</a></td></tr>\n`;
+      const to = r.program ? `, for ${esc(programName(r.program))}` : "";
+      body += `<tr><td>${esc(day(r.frozen))}</td><td>${esc(r.project)}${to}</td><td class="r">${esc(r.hours)}</td><td>${reviewStatus(r.id)}</td><td><a href="/r/${r.id}">/r/${r.id}</a></td></tr>\n`;
     }
     body += `</table>\n`;
   }
@@ -1612,42 +1668,113 @@ function lastRepo(name, project) {
   return "";
 }
 
-async function submitForm(res, s, name, project, { error, from, to, repo, status = 200 } = {}) {
+async function submitForm(res, s, name, project, { error, from, to, repo, status = 200, program = null } = {}) {
   const { hours } = await reportOf(name, await storeOf(name));
   const p = hours.find((x) => projectKey(x.name) === projectKey(project));
-  if (!p) return page(res, "steer", `<h1>No project called ${esc(project)}</h1>\n<p><a href="/me">Back to your steer</a></p>`, { csp: ME_CSP, status: 404 });
+  const back = program ? `/submit/${program.id}` : "/me";
+  if (!p) return page(res, "steer", `<h1>No project called ${esc(project)}</h1>\n<p><a href="${back}">Back</a></p>`, { csp: ME_CSP, status: 404 });
   repo ??= lastRepo(name, p.name);
+  const top = program
+    ? `<h1><a href="${back}">submit to ${esc(program.name)}</a> / ${esc(p.name)}</h1>
+<p>This freezes the project's hours into a review page with its own link, then ${program.form ? `takes you back to the ${esc(program.name)} form with it filled in` : `gives you what to paste into the ${esc(program.name)} form`}. The page doesn't change after that, even if you keep working.</p>`
+    : `<h1><a href="/me">your steer</a> / submit ${esc(p.name)}</h1>
+<p>This freezes the project's hours into a review page with its own link, which you give the program you're submitting to. The page doesn't change after that, even if you keep working.</p>`;
   page(
     res,
     `submit ${p.name}`,
-    `<h1><a href="/me">your steer</a> / submit ${esc(p.name)}</h1>
-<p>This freezes the project's hours into a review page with its own link, which you give the program you're submitting to. The page doesn't change after that, even if you keep working.</p>
-${error ? `<p class="red">${esc(capital(error))}.</p>\n` : ""}<form method="post" action="/me/submit">
+    `${top}
+${error ? `<p class="red">${esc(capital(error))}.</p>\n` : ""}<form method="post" action="${back === "/me" ? "/me/submit" : back}">
 <input type="hidden" name="csrf" value="${esc(s.csrf)}">
 <input type="hidden" name="project" value="${esc(p.name)}">
 <p><label>GitHub repo<br><input class="field" name="repo" value="${esc(repo)}" placeholder="https://github.com/you/project" size="45" spellcheck="false"></label></p>
 <p class="muted">So the commits on the page get checked against GitHub. Leave it empty if the code isn't on GitHub.</p>
 <p>Only some days? <label>from <input class="field" type="date" name="from" value="${esc(from ?? "")}"></label> <label>to <input class="field" type="date" name="to" value="${esc(to ?? "")}"></label></p>
 <p class="muted">Leave the days empty for all of it, ${esc(p.your_time)} so far. Only pick days if part of this project was already submitted before.</p>
-<p><button>Make the review page</button> &nbsp; <a href="/me">cancel</a></p>
+<p><button>Make the review page</button> &nbsp; <a href="${back}">cancel</a></p>
 </form>
 <p class="muted">It can take a few seconds, it works out all your hours and looks your commits up on GitHub.</p>`,
     { csp: ME_CSP, status },
   );
 }
 
-async function meSubmit(req, res) {
+/** The submit form on /me, or on a program's /submit link when `program` is set. */
+async function meSubmit(req, res, program = null) {
   const got = await meForm(req, res);
   if (!got) return;
   const { s, form } = got;
   const name = accountOf(s.sub);
-  if (!name) return redirect(res, "/me");
+  if (!name) return redirect(res, program ? `/submit/${program.id}` : "/me");
   const project = form.get("project") ?? "";
   const from = form.get("from") || null;
   const to = form.get("to") || null;
-  const made = await makeReview(name, { project, from, to, repo: cleanRepo(form.get("repo")) });
-  if (made.error) return submitForm(res, s, name, project, { error: made.error, from, to, repo: form.get("repo") ?? "", status: made.status });
-  redirect(res, `/me?made=${made.review.id}`);
+  const made = await makeReview(name, { project, from, to, repo: cleanRepo(form.get("repo")), program: program?.id ?? null });
+  if (made.error) return submitForm(res, s, name, project, { error: made.error, from, to, repo: form.get("repo") ?? "", status: made.status, program });
+  redirect(res, program ? `/submit/${program.id}/done?r=${made.review.id}` : `/me?made=${made.review.id}`);
+}
+
+// ---------- submitting to a program (/submit/<id>) ----------
+// The link a program puts on its submission form. Sign in with Hack Club, pick the
+// project, and steer makes the review page and takes you back to the program's form
+// with the review page and hours filled in. Nothing to copy, no terminal.
+
+async function programPage(req, res, program, url) {
+  const s = sessionOf(req);
+  const title = `submit to ${program.name}`;
+  const then = program.form
+    ? `then takes you back to the ${esc(program.name)} form with the review page and hours filled in`
+    : `then gives you the review page and hours to paste into the ${esc(program.name)} form`;
+  if (!s) {
+    return page(
+      res,
+      title,
+      `<h1><a href="/">steer</a> / submit to ${esc(program.name)}</h1>
+<p>Sign in with your Hack Club account and pick the project. steer freezes its hours into a review page, ${then}.</p>
+<p><a class="button" href="/submit/${program.id}/login">Sign in with Hack Club</a></p>
+<p class="muted">From your Hack Club account steer only keeps your Slack id and whether you're verified and eligible for YSWS. The rest is on <a href="/privacy">/privacy</a>.</p>`,
+      { csp: ME_CSP },
+    );
+  }
+  const name = accountOf(s.sub);
+  const project = url.searchParams.get("project");
+  if (name && project !== null) return submitForm(res, s, name, project, { program });
+  let body = `<h1><a href="/me">your steer</a> / submit to ${esc(program.name)}</h1>\n${meTop(s, name)}`;
+  if (!name) {
+    body += `<p>Your Hack Club account doesn't have steer yet, so there's nothing to submit. Install it on the computer you code on, work on the project with an AI tool, and come back to this page.</p>\n${installBox(req)}`;
+    return page(res, title, body, { csp: ME_CSP, script: "/copy.js" });
+  }
+  const { hours } = await reportOf(name, await storeOf(name));
+  if (!hours.length) {
+    body += `<p>Nothing tracked yet. Once you work with an AI tool in a project it shows up here, usually within a minute. If steer isn't on this computer yet:</p>\n${installBox(req)}`;
+    return page(res, title, body, { csp: ME_CSP, script: "/copy.js" });
+  }
+  body += `<p>Which project are you submitting? steer freezes its hours into a review page, ${then}.</p>
+<table class="list">
+<tr><th>Project</th><th class="r">Your time</th><th class="r">Sessions</th><th></th></tr>\n`;
+  for (const p of hours) {
+    body += `<tr><td>${esc(p.name)}</td><td class="r">${esc(p.your_time)}</td><td class="r">${p.sessions}</td><td><a href="/submit/${program.id}?project=${encodeURIComponent(p.name)}">submit this one</a></td></tr>\n`;
+  }
+  page(res, title, `${body}</table>\n`, { csp: ME_CSP });
+}
+
+/** After the review page is made: back to the program's form with it, or what to paste. */
+function programDone(req, res, program, id) {
+  const s = sessionOf(req);
+  const name = s && accountOf(s.sub);
+  const r = name && REVIEW_ID.test(id) ? readReview(id) : null;
+  if (!r || r.user !== name) return redirect(res, `/submit/${program.id}`);
+  let body = `<h1><a href="/me">your steer</a> / submitted to ${esc(program.name)}</h1>
+<p>Review page for ${esc(r.project)}, ${esc(r.hours)} hours: <a href="/r/${r.id}">${esc(r.url)}</a></p>\n`;
+  if (program.form) {
+    body += `<p><a class="button" href="${esc(fillForm(program.form, r))}">Back to the ${esc(program.name)} form</a></p>
+<p class="muted">The form gets the link to the review page and the hours. The page doesn't change after this, even if you keep working.</p>`;
+  } else {
+    body += `<p>Paste these into the ${esc(program.name)} form. The review page:</p>
+<div class="cmd"><pre><code>${esc(r.url)}</code></pre></div>
+<p>And for the hours, or wherever it asks how you spent the time:</p>
+<div class="cmd"><pre><code>${esc(r.line)}</code></pre></div>
+<p class="muted">The page doesn't change after this, even if you keep working.</p>`;
+  }
+  page(res, `submitted to ${program.name}`, body, { csp: ME_CSP, script: "/copy.js" });
 }
 
 async function meDeletePage(res, s, name, { error, status = 200 } = {}) {
@@ -2070,6 +2197,18 @@ async function handle(req, res) {
       if (!me) return;
       return path === "/me/submit" ? submitForm(res, me.s, me.name, url.searchParams.get("project") ?? "") : meDeletePage(res, me.s, me.name);
     }
+  }
+
+  // ----- submitting to a program, from the link on its form -----
+  if ((m = /^\/submit\/([^/]+?)(\/login|\/done)?$/.exec(path))) {
+    const program = PROGRAMS.get(m[1]);
+    if (!program) {
+      return page(res, "steer", `<h1>steer doesn't know this program</h1>\n<p>Programs that use steer link here from their submission form. You can also submit any project from <a href="/me">your steer</a> and paste the review page into the form yourself.</p>`, { status: 404 });
+    }
+    if (req.method === "GET" && !m[2]) return programPage(req, res, program, url);
+    if (req.method === "POST" && !m[2]) return meSubmit(req, res, program);
+    if (req.method === "GET" && m[2] === "/login") return sessionOf(req) ? redirect(res, `/submit/${program.id}`) : signIn(req, res, `/submit/${program.id}`);
+    if (req.method === "GET" && m[2] === "/done") return programDone(req, res, program, url.searchParams.get("r") ?? "");
   }
 
   if (req.method === "POST" && path === "/api/events") return postEvents(req, res);

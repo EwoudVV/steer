@@ -118,14 +118,16 @@ const COMMIT_CLOSE = 15 * 60 * 1000; // a commit's time on GitHub this close to 
 // Slack ids of people who can approve, cut or reject review pages: fraud squad and
 // program reviewers. Set on the server, comma separated.
 const REVIEWERS = new Set((process.env.STEER_REVIEWERS ?? "").split(",").map((s) => s.trim()).filter(Boolean));
+const SLACK_ID = /^[UW][A-Z0-9]{2,20}$/;
 // Programs whose submission form links to /submit/<id>. People sign in there, pick the
 // project, and go back to the program's form with the review page and hours filled in.
-// They're listed in server/programs.json: a name, and the form's address with {review},
-// {hours}, {line}, {project} or {id} where those go, or null to show them for copying.
+// They're listed in server/programs.json: a name, the form's address with {review},
+// {hours}, {line}, {project} or {id} where those go (or null to show them for copying),
+// and the Slack ids of the program's reviewers. Those can approve, cut or reject only
+// what's submitted to their program, unlike STEER_REVIEWERS who can on any page.
 const PROGRAM_ID = /^[a-z0-9-]{1,40}$/;
 const FORM_FIELDS = new Set(["review", "hours", "line", "project", "id"]);
 const PROGRAMS = isMainThread ? loadPrograms(process.env.STEER_PROGRAMS ?? join(here, "programs.json")) : new Map();
-const SLACK_ID = /^[UW][A-Z0-9]{2,20}$/;
 const eventsFile = (name) => join(DATA, "events", `${name}.jsonl`);
 const sha256 = (s) => createHash("sha256").update(s).digest("hex");
 
@@ -146,7 +148,8 @@ function loadPrograms(file) {
       console.error(`programs: left out ${id}, it needs a name, and a form that's null or an https address with only known {fields} after the host`);
       continue;
     }
-    programs.set(id, { id, name, form });
+    const reviewers = Array.isArray(p.reviewers) ? p.reviewers.filter((r) => typeof r === "string" && SLACK_ID.test(r)) : [];
+    programs.set(id, { id, name, form, reviewers: new Set(reviewers) });
   }
   return programs;
 }
@@ -1230,10 +1233,21 @@ function sessionOf(req) {
   return s && s.until > Date.now() ? s : null;
 }
 
-function reviewerOf(req) {
-  const s = sessionOf(req);
-  return s && REVIEWERS.has(s.slack) ? s : null;
+/** True when this Slack id can approve, cut or reject this review page: anyone on
+ * STEER_REVIEWERS, and a program's own reviewers for what was submitted to it. */
+function mayReview(slack, r) {
+  if (!slack) return false;
+  return REVIEWERS.has(slack) || Boolean(r?.program && PROGRAMS.get(r.program)?.reviewers.has(slack));
 }
+
+/** Who's signed in, if they can review this review page. */
+function reviewerOf(req, r) {
+  const s = sessionOf(req);
+  return s && mayReview(s.slack, r) ? s : null;
+}
+
+/** The programs this Slack id reviews for. */
+const programsReviewedBy = (slack) => [...PROGRAMS.values()].filter((p) => slack && p.reviewers.has(slack));
 
 /** The steer account linked to a Hack Club account, or null. */
 const accountOf = (sub) => Object.keys(users).find((n) => users[n].hc?.sub === sub) ?? null;
@@ -1304,11 +1318,11 @@ async function signInDone(req, res, authCode, state) {
   }
   const cookies = [startSession(req, info), `steer_signin=; Path=/auth; HttpOnly; SameSite=Lax; Max-Age=0${secureFor(baseFor(req))}`];
   const review = /^\/r\/([A-Za-z0-9_-]{12})$/.exec(back)?.[1];
-  if (review && !REVIEWERS.has(slack)) {
+  if (review && !mayReview(slack, readReview(review))) {
     return page(
       res,
       "steer",
-      `<h1>Not a reviewer</h1>\n<p>Your Hack Club account (${esc(slack ?? "no Slack id")}) isn't on this server's list of reviewers. Fraud squad and program reviewers get added on request.</p>\n<p><a href="/r/${review}">Back to the review page</a> or <a href="/me">to your own steer</a></p>`,
+      `<h1>Not a reviewer here</h1>\n<p>Your Hack Club account (${esc(slack ?? "no Slack id")}) can't review this page. Fraud squad and program reviewers get added on request, and a program's reviewers can only review what was submitted to that program.</p>\n<p><a href="/r/${review}">Back to the review page</a> or <a href="/me">to your own steer</a></p>`,
       { headers: { "set-cookie": cookies } },
     );
   }
@@ -1321,11 +1335,11 @@ function reviewerLogin(req, res, review) {
 }
 
 async function decide(req, res, id) {
-  const who = reviewerOf(req);
-  if (!who) return send(res, 403, "Sign in as a reviewer first.");
-  if (!fromHere(req)) return send(res, 403, "This form only works from the review page.");
   const r = readReview(id);
   if (!r) return send(res, 404, "No such review page");
+  const who = reviewerOf(req, r);
+  if (!who) return send(res, 403, "Sign in as a reviewer of this page first.");
+  if (!fromHere(req)) return send(res, 403, "This form only works from the review page.");
   if (ownHours(r, who)) return send(res, 403, "These are your own hours, someone else has to review them.");
   const body = await readBody(req, 10_000);
   if (body === TOO_BIG) return tooLarge(req, res);
@@ -1404,7 +1418,7 @@ function readReview(id) {
 function reviewPage(req, res, id) {
   const r = readReview(id);
   if (!r) return send(res, 404, "No such review page");
-  const who = reviewerOf(req);
+  const who = reviewerOf(req, r);
   const u = encodeURIComponent(r.user);
   // The sign-in goes at the top: a review page is long, and reviewers are who it's for.
   const signIn = who ? "" : `<p class="muted">Fraud squad or a program reviewer? <a href="/reviewer/login?r=${id}">Sign in to approve, cut or reject these hours</a>.</p>\n`;
@@ -1548,6 +1562,30 @@ function reviewStatus(id) {
   return `${what} by ${esc(d.name)}${d.note ? `: "${esc(d.note)}"` : ""}`;
 }
 
+/** For a program's reviewers: everything submitted to that program, newest first, with
+ * what's been decided. They can review these even without a steer account of their own. */
+function programQueues(slack) {
+  let h = "";
+  for (const p of programsReviewedBy(slack)) {
+    const subs = [];
+    for (const [user, u] of Object.entries(users)) {
+      for (const r of u.reviews ?? []) if (r.program === p.id) subs.push({ ...r, user });
+    }
+    subs.sort((a, b) => b.frozen.localeCompare(a.frozen));
+    h += `<h2>Submitted to ${esc(p.name)}</h2>\n<p>You review for ${esc(p.name)}, so you can approve, cut or reject the hours on these.</p>\n`;
+    if (!subs.length) {
+      h += `<p class="muted">Nothing yet. Review pages show up here once people submit through steer.duck.hackclub.app/submit/${esc(p.id)}.</p>\n`;
+      continue;
+    }
+    h += `<table class="list">\n<tr><th>Made</th><th>Who</th><th>Project</th><th class="r">Hours</th><th>Review</th><th>Page</th></tr>\n`;
+    for (const r of subs) {
+      h += `<tr><td>${esc(day(r.frozen))}</td><td>${esc(r.user)}</td><td>${esc(r.project)}</td><td class="r">${esc(r.hours)}</td><td>${reviewStatus(r.id)}</td><td><a href="/r/${r.id}">/r/${r.id}</a></td></tr>\n`;
+    }
+    h += `</table>\n`;
+  }
+  return h;
+}
+
 /** After making a review page: its link and the line to paste. */
 function madeNotice(name, id) {
   const r = id && REVIEW_ID.test(id) ? readReview(id) : null;
@@ -1576,6 +1614,7 @@ async function mePage(req, res, url) {
   const name = accountOf(s.sub);
   let body = `<h1><a href="/">steer</a> / your steer</h1>\n${meTop(s, name)}`;
   if (REVIEWERS.has(s.slack)) body += `<p>You're on the reviewer list, so you can approve, cut or reject the hours on any review page.</p>\n`;
+  body += programQueues(s.slack);
   if (!name) {
     body += `<p>Your Hack Club account doesn't have steer yet. Install it on the computer you code on. It asks you to sign in with Hack Club once, then your projects show up here while you work.</p>
 ${installBox(req)}<p class="muted">Made a steer account before you could sign in with Hack Club? Run <code>steer login</code> on that computer once and it gets linked to this one.</p>`;

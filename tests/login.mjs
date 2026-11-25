@@ -52,7 +52,7 @@ const programs = join(data, "programs.json");
 writeFileSync(
   programs,
   JSON.stringify({
-    fixit: { name: "Fix It", form: "https://forms.example.com/fixit?review={review}&hours={hours}&p={project}" },
+    fixit: { name: "Fix It", form: "https://forms.example.com/fixit?review={review}&hours={hours}&p={project}", reviewers: ["UFIX1", "not a slack id"] },
     plain: { name: "Plain", form: null },
     sneaky: { name: "Sneaky", form: "https://{project}.example.com/form" },
     insecure: { name: "Insecure", form: "http://forms.example.com/form?r={review}" },
@@ -267,7 +267,7 @@ try {
     // Someone who isn't a reviewer is signed in, but gets no form.
     nextUser = { sub: "ident!nope", nickname: "rando", slack_id: "U999" };
     const nope = await signIn();
-    assert.match(await nope.text(), /isn't on this server's list of reviewers/);
+    assert.match(await nope.text(), /can't review this page/);
     assert.ok(!(await (await fetch(STEER + path, { headers: { cookie: cookieFrom(nope, "steer_session") } })).text()).includes("<form"));
 
     nextUser = { sub: "ident!udo", nickname: "udo", slack_id: "UREVIEW1" };
@@ -446,6 +446,28 @@ try {
     const plainDone = await get(plain.headers.get("location"), viaProgram);
     assert.ok(plainDone.includes(`${STEER}/r/`) && plainDone.includes("h tracked with steer, review: "), "the review page and the line to paste");
     assert.ok(!plainDone.includes("Back to the"), "and no form to go back to");
+
+    // A program's own reviewer, without a steer account, sees what was submitted to the
+    // program on /me and can decide on it, but not on anything else.
+    nextUser = { sub: "ident!fixer", nickname: "fixer", slack_id: "UFIX1" };
+    const fixer = await webSignIn();
+    const queue = await get("/me", fixer);
+    assert.match(queue, /You review for Fix It/);
+    assert.ok(queue.includes(`href="/r/${sentId}"`), "what was submitted to Fix It is listed");
+    assert.ok(!queue.includes(`href="/r/${id}"`), "what wasn't, isn't");
+    const fixPage = await get(`/r/${sentId}`, fixer);
+    assert.match(fixPage, /Your review/);
+    const fixCsrf = /name="csrf" value="([^"]+)"/.exec(fixPage)[1];
+    assert.equal((await post(`/r/${sentId}/decide`, fixer, { csrf: fixCsrf, action: "approve" })).status, 303);
+    assert.match(await get("/me", fixer), /approved by fixer/);
+    assert.ok(!(await get(`/r/${id}`, fixer)).includes("Your review"), "a page submitted elsewhere has no review form");
+    assert.equal((await post(`/r/${id}/decide`, fixer, { csrf: fixCsrf, action: "approve" })).status, 403);
+    // Signing in from that other page says they can't review it.
+    const goOther = await fetch(`${STEER}/reviewer/login?r=${id}`, { redirect: "manual", headers: ip });
+    const backOther = await fetch(goOther.headers.get("location"), { redirect: "manual" });
+    const doneOther = await fetch(backOther.headers.get("location"), { redirect: "manual", headers: { cookie: cookieFrom(goOther, "steer_signin") } });
+    assert.match(await doneOther.text(), /can't review this page/);
+    nextUser = { sub: "ident!aaa", nickname: "Duck", slack_id: "U123", verification_status: "verified", ysws_eligible: true };
 
     // Signing out.
     const out = await post("/me/logout", cookie, { csrf });

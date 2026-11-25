@@ -110,7 +110,7 @@ the same page lists the review pages you made and what reviewers decided, and yo
 
 put a link to `https://steer.duck.hackclub.app/submit/your-program` on your submission form. people sign in with hack club there, pick the project, and steer makes the review page and takes them back to your form with the review page and hours already filled in. no terminal and nothing to copy.
 
-to get your program on it, open a pr that adds it to [server/programs.json](server/programs.json): its name, and your form's address with `{review}`, `{hours}`, `{line}` or `{project}` where those go. most form tools take values in the link, like airtable's `prefill_` fields or google forms' `entry.` ones. with `"form": null` steer shows people what to paste instead. every review page also has a json version at `/api/r/ID` with the program it was made for, the hours and what reviewers decided.
+to get your program on it, open a pr that adds it to [server/programs.json](server/programs.json): its name, your form's address with `{review}`, `{hours}`, `{line}` or `{project}` where those go, and your reviewers' slack ids. your reviewers see everything submitted to your program on their steer page, and can approve, cut or reject only those hours. most form tools take values in the link, like airtable's `prefill_` fields or google forms' `entry.` ones. with `"form": null` steer shows people what to paste instead. every review page also has a json version at `/api/r/ID` with the program it was made for, the hours and what reviewers decided.
 
 ## readme badge
 

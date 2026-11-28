@@ -46,6 +46,7 @@ fn tools() -> Vec<(&'static str, bool)> {
         ("copilot", env_or("COPILOT_HOME", home.join(".copilot")).exists()),
         ("cursor", live::cursor_dir().exists()),
         ("freebuff", crate::freebuff::root().join("projects").exists()),
+        ("junie", crate::junie::home_dir().exists()),
     ]
 }
 
@@ -141,7 +142,7 @@ pub fn install(args: &[String]) -> Result<String, String> {
         if cursor { "claude code and cursor" } else { "claude code" }
     );
     if watch {
-        println!("  - run a small background watcher that starts at login. it reads codex, opencode, copilot and freebuff logs, and notices when you change code or commit in repos you use ai in (only counts get sent, never file names or code)");
+        println!("  - run a small background watcher that starts at login. it reads codex, opencode, copilot, freebuff and junie logs, and notices when you change code or commit in repos you use ai in (only counts get sent, never file names or code)");
         let editors: Vec<&str> = crate::editor::status().into_iter().map(|(name, _)| name).collect();
         if !editors.is_empty() {
             println!(
@@ -596,9 +597,17 @@ pub fn doctor() -> i32 {
         (false, false) => Check::Info("cursor isn't installed".into()),
     });
     checks.push(if watch::running() {
-        Check::Ok("the watcher (codex, opencode, copilot, freebuff, saves and commits) is running".into())
+        Check::Ok("the watcher (codex, opencode, copilot, freebuff, junie, saves and commits) is running".into())
     } else {
-        Check::Fix("the watcher (codex, opencode, copilot, freebuff, saves and commits) isn't running, run steer setup".into())
+        Check::Fix("the watcher (codex, opencode, copilot, freebuff, junie, saves and commits) isn't running, run steer setup".into())
+    });
+    // The watcher reads the sessions Junie saves. The cli and the jetbrains ide plugin
+    // both save them in the same place.
+    let junie_sessions = short(&crate::junie::home_dir().join("sessions"));
+    checks.push(match crate::junie::saved_sessions() {
+        None => Check::Info("junie isn't installed".into()),
+        Some(0) => Check::Info(format!("junie hasn't saved a session in {junie_sessions} yet, steer reads junie from there")),
+        Some(n) => Check::Ok(format!("junie saved {n} session{} in {junie_sessions}, the watcher reads them", if n == 1 { "" } else { "s" })),
     });
     for (editor, on) in crate::editor::status() {
         checks.push(if on {

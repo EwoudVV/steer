@@ -279,16 +279,16 @@ const KINDS = new Set(["prompt", "tool", "stop", "interrupt", "checkin", "run", 
 // Evidence from the project, sent by steer's watcher and terminal lines: a command you ran
 // (its first word and exit code), that files were saved, a commit's hash.
 const EVIDENCE = new Set(["run", "save", "commit"]);
-// The tools steer tracks. Only Codex and Copilot write down a stopped turn; the
+// The tools steer tracks. Only Codex, Copilot and Junie write down a stopped turn; the
 // Claude Code and Cursor hooks and OpenCode never send an interrupt.
-const VIAS = new Set(["claude-code", "cursor", "codex", "opencode", "copilot", "freebuff", "chatgpt", "claude-ai", "steer"]);
+const VIAS = new Set(["claude-code", "cursor", "codex", "opencode", "copilot", "freebuff", "junie", "chatgpt", "claude-ai", "steer"]);
 // Check-ins (`steer checkin on`): the person's answer to "what are you doing right now?",
 // used to fit the credit curve. They come from steer itself and never count as time.
 // "project" and "project-ai" are the two working buttons from before 0.5.5, which split
 // working into "working" and "waiting" (on the ai).
 const ANSWERS = new Set(["working", "waiting", "project-ai", "project", "other", "none"]);
 // Claude Code sends interrupts from its tool hooks (a tool the person stopped).
-const INTERRUPTS = new Set(["codex", "copilot", "claude-code"]);
+const INTERRUPTS = new Set(["codex", "copilot", "junie", "claude-code"]);
 // Signs of attention, collected so time can be counted from what the person does
 // instead of from gaps. Not counted yet:
 // - "wait": the agent is waiting on the person (a permission prompt showed)
@@ -302,7 +302,7 @@ const INTERRUPTS = new Set(["codex", "copilot", "claude-code"]);
 // - "front": from the same extension, a stretch of `secs` seconds from `t` the editor
 //   window was in front with the project open
 const ATTENTION = new Set(["wait", "focus", "copy", "typing", "away", "back", "here", "editor", "front"]);
-const WAITS = { via: new Set(["claude-code", "codex", "cursor"]), reasons: new Set(["permission", "question"]) };
+const WAITS = { via: new Set(["claude-code", "codex", "cursor", "junie"]), reasons: new Set(["permission", "question"]) };
 const CHATS = new Set(["chatgpt", "claude-ai"]);
 const EDITORS = new Set(["vscode", "cursor"]);
 // Sent by steer itself rather than an AI tool.

@@ -202,6 +202,9 @@ try {
     // The check-in buttons since 0.5.5.
     ev({ kind: "checkin", via: "steer", answer: "working", answered_after: 3 }),
     ev({ kind: "checkin", via: "steer", answer: "waiting", answered_after: 2 }),
+    prompt({ via: "junie" }),
+    // Junie writes down when the person stops it.
+    ev({ kind: "interrupt", via: "junie" }),
     // The editor in front with the project open, from the same extension since 0.5.9.
     ev({ kind: "front", via: "steer", app: "cursor", secs: 90, t: iso(Date.now() - 3 * 60_000) }),
     // A stretch of working in the project's files, from the VS Code and Cursor extension.
@@ -452,6 +455,7 @@ try {
     const chat = (kind, o = {}) => ev({ kind, tool: undefined, via: "chatgpt", session: "chat1", ...o });
     const good = [
       ev({ kind: "wait", tool: undefined, reason: "permission" }),
+      ev({ kind: "wait", tool: undefined, via: "junie", reason: "question" }),
       ev({ tool: "Bash", ms: 1234 }),
       ev({ kind: "interrupt", tool: undefined }),
       prompt({ mode: "acceptEdits" }),
@@ -478,7 +482,7 @@ try {
     assert.equal(r.body.accepted, good.length);
     assert.equal(r.body.dropped, bad.length);
     const stored = (await get("/api/u/watcher/events")).text;
-    for (const part of ['"reason":"permission"', '"ms":1234', '"mode":"acceptEdits"', '"mode":"on-request"', '"on":true', '"away_secs":910', '"kind":"here"']) {
+    for (const part of ['"reason":"permission"', '"reason":"question"', '"ms":1234', '"mode":"acceptEdits"', '"mode":"on-request"', '"on":true', '"away_secs":910', '"kind":"here"']) {
       assert.ok(stored.includes(part), `kept ${part}`);
     }
     assert.ok(!(await get("/u/watcher")).text.includes(">presence<"), "they don't make a project or count as time");

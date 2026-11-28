@@ -8,6 +8,7 @@ mod freebuff;
 mod idle;
 mod claude;
 mod git;
+mod junie;
 mod live;
 mod native;
 mod manage;

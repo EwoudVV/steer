@@ -4,7 +4,7 @@
 //! few seconds, same as the Claude Code hook. `steer setup` makes it start at login.
 
 use crate::live::{self, dir, enqueue, load_config};
-use crate::{codex, copilot, freebuff, opencode};
+use crate::{codex, copilot, freebuff, junie, opencode};
 use serde_json::{json, Map, Value};
 use std::collections::HashSet;
 use std::fs;
@@ -71,6 +71,7 @@ pub fn run() -> i32 {
     let mut skip_codex = !state.contains_key("codex");
     let mut skip_copilot = !state.contains_key("copilot");
     let mut skip_freebuff = !state.contains_key("freebuff");
+    let mut skip_junie = !state.contains_key("junie");
     let mut sent = HashSet::new();
     // Only the installed copy updates itself, never a build someone is working on.
     let installed = std::env::current_exe().ok().and_then(|e| fs::canonicalize(e).ok()) == fs::canonicalize(live::bin_path()).ok();
@@ -119,9 +120,13 @@ pub fn run() -> i32 {
         if let Some(s) = state.entry("freebuff").or_insert_with(|| json!({})).as_object_mut() {
             events.extend(freebuff::poll(s, skip_freebuff));
         }
+        if let Some(s) = state.entry("junie").or_insert_with(|| json!({})).as_object_mut() {
+            events.extend(junie::poll(s, skip_junie, &mut sent));
+        }
         skip_codex = false;
         skip_copilot = false;
         skip_freebuff = false;
+        skip_junie = false;
         events.extend(crate::evidence::poll(&mut evidence));
         if let Some(s) = state.entry("editor").or_insert_with(|| json!({})).as_object_mut() {
             events.extend(crate::editor::poll(s));
@@ -154,6 +159,8 @@ pub fn dry_run(days: i64) -> String {
     out += &summary("codex", codex_events.iter().filter(recent).collect());
     let copilot_events = copilot::poll(&mut Map::new(), false);
     out += &summary("copilot", copilot_events.iter().filter(recent).collect());
+    let junie_events = junie::poll(&mut Map::new(), false, &mut HashSet::new());
+    out += &summary("junie", junie_events.iter().filter(recent).collect());
 
     let mut oc_state = Map::new();
     oc_state.insert("cursor".into(), cutoff.timestamp_millis().into());
@@ -175,7 +182,7 @@ fn summary(tool: &str, events: Vec<&Value>) -> String {
     let sessions: HashSet<&str> = events.iter().filter_map(|e| e["session"].as_str()).collect();
     let projects: HashSet<&str> = events.iter().filter_map(|e| e["project"].as_str()).collect();
     format!(
-        "{tool}: {} sessions in {} projects, {} prompts ({} with images), {} tool calls, {} turn ends, {} interrupts\n",
+        "{tool}: {} sessions in {} projects, {} prompts ({} with images), {} tool calls, {} turn ends, {} interrupts, {} waits\n",
         sessions.len(),
         projects.len(),
         count("prompt"),
@@ -183,6 +190,7 @@ fn summary(tool: &str, events: Vec<&Value>) -> String {
         count("tool"),
         count("stop"),
         count("interrupt"),
+        count("wait"),
     )
 }
 

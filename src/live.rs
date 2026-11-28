@@ -1163,7 +1163,7 @@ pub(crate) fn status() -> String {
         }
     );
     out += &format!(
-        "watcher (codex, opencode, copilot, freebuff, saves and commits): {}\n",
+        "watcher (codex, opencode, copilot, freebuff, junie, saves and commits): {}\n",
         if crate::watch::running() { "running" } else { "not running, run steer setup" }
     );
     out += &format!("waiting to send: {} events", queued());

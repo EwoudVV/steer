@@ -1,5 +1,5 @@
-//! Shared by the readers of JSONL session logs (Codex, Copilot): reads only the lines
-//! added to each file since last time, and remembers where it got to.
+//! Shared by the readers of JSONL session logs (Codex, Copilot, Junie): reads only the
+//! lines added to each file since last time, and remembers where it got to.
 
 use serde_json::{json, Map, Value};
 use std::fs::{self, File};
@@ -43,6 +43,32 @@ pub fn poll(
     meta: impl Fn(&Path) -> (String, String),
     mut parse: impl FnMut(&Value, &mut Ctx, u64) -> Option<Value>,
 ) -> Vec<Value> {
+    poll_lines(files, state, skip_existing, meta, |line, ctx, offset| {
+        let v = serde_json::from_slice::<Value>(line).ok()?;
+        parse(&v, ctx, offset)
+    })
+}
+
+/// Same as `poll`, but `parse` gets each line as it is in the file, so a reader can skip
+/// lines it doesn't need without parsing them.
+pub fn poll_lines(
+    files: Vec<PathBuf>,
+    state: &mut Map<String, Value>,
+    skip_existing: bool,
+    meta: impl Fn(&Path) -> (String, String),
+    parse: impl FnMut(&[u8], &mut Ctx, u64) -> Option<Value>,
+) -> Vec<Value> {
+    read_new(files, state, skip_existing, meta, parse, MAX_READ)
+}
+
+fn read_new(
+    files: Vec<PathBuf>,
+    state: &mut Map<String, Value>,
+    skip_existing: bool,
+    meta: impl Fn(&Path) -> (String, String),
+    mut parse: impl FnMut(&[u8], &mut Ctx, u64) -> Option<Value>,
+    max_read: u64,
+) -> Vec<Value> {
     let mut out = Vec::new();
     for path in files {
         let key = path.to_string_lossy().into_owned();
@@ -53,6 +79,7 @@ pub fn poll(
         let mut offset = entry["offset"].as_u64().unwrap_or(0);
         if len < offset {
             offset = 0; // the file was replaced
+            remove(entry, "skip");
         }
         if len == offset {
             continue;
@@ -73,17 +100,37 @@ pub fn poll(
             continue;
         }
         let mut buf = Vec::new();
-        if file.take(MAX_READ).read_to_end(&mut buf).is_err() {
+        if file.take(max_read).read_to_end(&mut buf).is_err() {
             continue;
         }
-        // Only whole lines. A line still being written gets picked up next time.
-        let Some(end) = buf.iter().rposition(|&b| b == b'\n') else { continue };
-        let mut pos = offset;
-        for line in buf[..end].split(|&b| b == b'\n') {
+        let full = buf.len() as u64 == max_read;
+        // The rest of a line that was too long to read (see below) is dropped.
+        let mut start = 0;
+        if entry.get("skip").is_some() {
+            let Some(i) = buf.iter().position(|&b| b == b'\n') else {
+                entry["offset"] = (offset + buf.len() as u64).into();
+                continue;
+            };
+            start = i + 1;
+            remove(entry, "skip");
+        }
+        // Only whole lines. A line still being written gets picked up next time. One
+        // longer than what's read in one go never would be, so it's skipped instead of
+        // read again and again.
+        let Some(end) = buf[start..].iter().rposition(|&b| b == b'\n').map(|i| start + i) else {
+            if full && start == 0 {
+                entry["skip"] = true.into();
+                entry["offset"] = (offset + max_read).into();
+            } else {
+                entry["offset"] = (offset + start as u64).into();
+            }
+            continue;
+        };
+        let mut pos = offset + start as u64;
+        for line in buf[start..end].split(|&b| b == b'\n') {
             let line_offset = pos;
             pos += line.len() as u64 + 1;
-            let Ok(v) = serde_json::from_slice::<Value>(line) else { continue };
-            if let Some(e) = parse(&v, &mut ctx, line_offset) {
+            if let Some(e) = parse(line, &mut ctx, line_offset) {
                 out.push(e);
             }
         }
@@ -95,4 +142,46 @@ pub fn poll(
     }
     state.retain(|k, _| Path::new(k).exists());
     out
+}
+
+fn remove(entry: &mut Value, key: &str) {
+    if let Some(o) = entry.as_object_mut() {
+        o.remove(key);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Write;
+
+    #[test]
+    fn a_line_too_long_to_read_is_skipped() {
+        let dir = std::env::temp_dir().join(format!("steer-tail-{}", crate::live::new_id()));
+        fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("log.jsonl");
+        let append = |s: &str| fs::OpenOptions::new().create(true).append(true).open(&file).unwrap().write_all(s.as_bytes()).unwrap();
+        let mut state = Map::new();
+        let meta = |_: &Path| ("s".to_owned(), "p".to_owned());
+        let read = |state: &mut Map<String, Value>| -> Vec<String> {
+            read_new(vec![file.clone()], state, false, meta, |line, _, _| Some(String::from_utf8_lossy(line).into_owned().into()), 64)
+                .iter()
+                .map(|v| v.as_str().unwrap().to_owned())
+                .collect()
+        };
+        append("one\n");
+        assert_eq!(read(&mut state), ["one"]);
+        // Longer than the 64 bytes read at a time, and still being written.
+        append(&"x".repeat(100));
+        assert!(read(&mut state).is_empty());
+        append(&format!("{}\ntwo\n", "x".repeat(100)));
+        let got: Vec<String> = (0..5).flat_map(|_| read(&mut state)).collect();
+        assert_eq!(got, ["two"], "the long line is skipped a piece at a time, never read as lines");
+        // A line that's only partly there isn't read until it's whole.
+        append("thr");
+        assert!(read(&mut state).is_empty());
+        append("ee\n");
+        assert_eq!(read(&mut state), ["three"]);
+        let _ = fs::remove_dir_all(&dir);
+    }
 }

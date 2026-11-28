@@ -4,7 +4,7 @@
 
 steer tracks the time you spend working with ai coding agents. the time the agent runs by itself doesnt count, only what you do around it, like writing prompts, reading what it did, testing and fixing stuff. made for hack club's ai time tracking bounty.
 
-works with claude code, codex, opencode, copilot (vs code and cli), cursor and freebuff, and with the browser extension, chatgpt and claude on the web.
+works with claude code, codex, opencode, copilot (vs code and cli), cursor, freebuff and junie (jetbrains ides and cli), and with the browser extension, chatgpt and claude on the web.
 
 ## install
 
@@ -33,7 +33,7 @@ steer uninstall
 ## how it works
 
 - claude code and cursor run `steer hook` on every prompt, tool call and when the agent finishes
-- codex, opencode, copilot and freebuff dont have hooks like that, so a small background watcher (`steer watch`) reads their session logs every 5 seconds. it uses about 0.2% cpu
+- for codex, opencode, copilot, freebuff and junie, a small background watcher (`steer watch`) reads their session logs every 5 seconds instead. it uses about 0.2% cpu
 - the watcher also looks at the git repos you used an ai tool in during the last hour, every 30 seconds, to see when you change code or commit yourself. that counts the time you spend coding and testing by hand between prompts, within 30 minutes of using an ai tool. a change only counts if the agent wasn't editing right then, and saving a file without changing it or undoing back to how it was doesnt count. it only lists files with git and compares them itself, so nothing in a repo's own git settings can run
 - for chatgpt and claude on the web there's a browser extension. it sees when you send a message and when the answer is done, works out the prompt's counts right there in the browser, and gives only the counts to steer on your computer
 - in vs code and cursor, `steer setup` adds a small extension that notes when you type, click or scroll in a project's files while the editor is in front. an agent editing files doesnt count, since that happens without any typing or clicking. since 0.5.9 it also notes how long the editor is in front with a project open, so reading the agents answer in its chat or the terminal can count, but only while no agent is working and youre at the computer. it writes the folder and the times to `~/.steer`, and the watcher sends just the project and the times, for projects you used an ai tool in around then. steer updates the extension by itself when theres a new one
@@ -65,7 +65,7 @@ chats in the browser send the same counts as a prompt, with via `chatgpt` or `cl
 
 steer also collects a few signs of what you're doing, so it can count your time from what you actually do instead of guessing from gaps. they don't count toward anything yet:
 
-`wait: id, session, project, time, reason`: claude code showed you a permission prompt (only that it did, nothing about the tool or the command)
+`wait: id, session, project, time, reason`: claude code or junie showed you a permission prompt, or junie asked you a question (only that it did, nothing about the tool, the command or the question)
 `focus: id, session, project, time, on`: a chatgpt or claude tab came to the front, or stopped being there
 `copy / typing: id, session, project, time`: you copied something out of a chatgpt or claude tab, or started typing your next message there (never the text)
 `away / back / here: id, time, away_secs`: from your computer's idle timer, only within an hour of using an ai tool. away when nobody touched the keyboard or mouse for 2 minutes, back when someone does again (with how long they were gone), and here every 5 minutes while someone's there. the idle timer is one number of seconds, with no app names and nothing about what you typed
